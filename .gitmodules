@@ -1,0 +1,6 @@
+[submodule "hashtable"]
+	path = hashtable
+	url = https://github.com/goldsborough/hashtable
+[submodule "emacs-modules"]
+	path = emacs-modules
+	url = https://github.com/jkitchin/emacs-modules

@@ -9,3 +9,7 @@
 
 # Undo-tree save-files
 *.~undo-tree
+
+/.cache
+/build
+/compile_commands.json
