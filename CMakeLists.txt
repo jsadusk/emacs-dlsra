@@ -3,8 +3,8 @@ if(${CMAKE_VERSION} VERSION_LESS 3.12)
   cmake_policy(VERSION ${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION})
 endif()
 
-project(EmacsDLSRA VERSION 0.1
-  DESCRIPTION "Emacs Direct libssh remote access"
+project(TrampLibSSH VERSION 0.1
+  DESCRIPTION "Emacs tramp libssh backend"
   LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
