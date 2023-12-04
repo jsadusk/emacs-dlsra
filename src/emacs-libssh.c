@@ -2,14 +2,11 @@
 #include <emacs-module-helpers.h>
 #include <libssh/libssh.h>
 #include <stdlib.h>
-#include <hashtable.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
 
 int plugin_is_GPL_compatible;
-
-HashTable sessions_table;
 
 void message(emacs_env *env, char* message) {
     emacs_value data = env->make_string (env, message,
@@ -127,90 +124,75 @@ ssh_session get_session(emacs_env *env, char* username, char* hostname) {
     }
 
     ssh_session session = NULL;
-    if (ht_contains(&sessions_table, connection)) {
-        {
-            const char* fmt = "Retrieving ssh session for: %s";
-            char* message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
-            sprintf(message_str, fmt, connection);
-            message(env, message_str);
-            free(message_str);
-        }
-        session = (ssh_session)ht_lookup(&sessions_table, &connection);
-        if (session == NULL) {
-            sig_err(env, "session in cache is NULL");
-            return NULL;
-        }
-    } else {
+    {
         const char* fmt = "Connecting ssh session for: %s";
         char* message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
         sprintf(message_str, fmt, connection);
         message(env, message_str);
         free(message_str);
-        int rc;
+    }
+    int rc;
 
-        session = ssh_new();
-        if (session == NULL)
-            return NULL;
+    session = ssh_new();
+    if (session == NULL)
+        return NULL;
 
-        int verbosity = SSH_LOG_PROTOCOL;
-        int port = 22;
+    int verbosity = SSH_LOG_PROTOCOL;
+    int port = 22;
 
-        ssh_options_set(session, SSH_OPTIONS_HOST, hostname);
-        ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
-        ssh_options_set(session, SSH_OPTIONS_PORT, &port);
+    ssh_options_set(session, SSH_OPTIONS_HOST, hostname);
+    ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
+    ssh_options_set(session, SSH_OPTIONS_PORT, &port);
 
-        if (username != NULL) {
-            ssh_options_set(session, SSH_OPTIONS_USER, username);
+    if (username != NULL) {
+        ssh_options_set(session, SSH_OPTIONS_USER, username);
+    }
+
+    ssh_options_parse_config(session, NULL);
+
+    rc = ssh_connect(session);
+    if (rc != SSH_OK || session == NULL) {
+        {
+            const char* fmt = "Error connecting ssh: %s";
+            char* message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+            sprintf(message_str, fmt, connection);
+            message(env, message_str);
+            free(message_str);
         }
-
-        ssh_options_parse_config(session, NULL);
-
-        rc = ssh_connect(session);
-        if (rc != SSH_OK || session == NULL) {
-            {
-                const char* fmt = "Error connecting ssh: %s";
-                char* message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
-                sprintf(message_str, fmt, connection);
-                message(env, message_str);
-                free(message_str);
-            }
             
-            return NULL;
-        }
+        return NULL;
+    }
 
-        {
-            const char* fmt = "Connected, verifying knownhost: %s";
-            char *message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
-            sprintf(message_str, fmt, connection);
-            message(env, message_str);
-            free(message_str);
-        }
+    {
+        const char* fmt = "Connected, verifying knownhost: %s";
+        char *message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+        sprintf(message_str, fmt, connection);
+        message(env, message_str);
+        free(message_str);
+    }
 
-        if (verify_knownhost(session) != 0) {
-            return NULL;
-        }
+    if (verify_knownhost(session) != 0) {
+        return NULL;
+    }
 
-        {
-            const char* fmt = "Connected, authenticating: %s";
-            char *message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
-            sprintf(message_str, fmt, connection);
-            message(env, message_str);
-            free(message_str);
-        }
+    {
+        const char* fmt = "Connected, authenticating: %s";
+        char *message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+        sprintf(message_str, fmt, connection);
+        message(env, message_str);
+        free(message_str);
+    }
 
-        if (ssh_userauth_publickey_auto(session, NULL, NULL)) {
-            return NULL;
-        }
+    if (ssh_userauth_publickey_auto(session, NULL, NULL)) {
+        return NULL;
+    }
         
-        {
-            const char* fmt = "Session established: %s";
-            char *message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
-            sprintf(message_str, fmt, connection);
-            message(env, message_str);
-            free(message_str);
-        }
-
-        ht_insert(&sessions_table, connection, session);
+    {
+        const char* fmt = "Session established: %s";
+        char *message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+        sprintf(message_str, fmt, connection);
+        message(env, message_str);
+        free(message_str);
     }
 
     if (username != NULL) {
@@ -310,8 +292,6 @@ int emacs_module_init(struct emacs_runtime *ert)
 {
 
   emacs_env *env = ert->get_environment(ert);
-  ht_setup(&sessions_table, sizeof(char*), sizeof(ssh_session), 10);
-  ht_reserve(&sessions_table, 100);
 
   DEFUN("emacs-libssh-get-session", emacs_libssh_get_session, 2, 2, "Get an ssh session", NULL);
   provide(env, "emacs-libssh");
