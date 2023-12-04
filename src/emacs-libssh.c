@@ -18,6 +18,14 @@ void message(emacs_env *env, char* message) {
     env->funcall(env, env->intern(env, "message"), 1, &message_str);
 }
 
+void sig_err(emacs_env *env, char* message) {
+    emacs_value data = env->make_string (env, message,
+                                         strlen (message));
+    env->non_local_exit_signal
+        (env, env->intern (env, "error"),
+         env->funcall (env, env->intern (env, "list"), 1, &data));
+}
+
 int verify_knownhost(ssh_session session)
 {
     enum ssh_known_hosts_e state;
@@ -106,43 +114,109 @@ int verify_knownhost(ssh_session session)
     return 0;
 }
 
-ssh_session get_session(char* connection) {
-    if (ht_contains(&sessions_table, connection)) {
-        return (ssh_session)ht_lookup(&sessions_table, &connection);
+ssh_session get_session(emacs_env *env, char* username, char* hostname) {
+
+    char *connection = NULL;
+    if (username == NULL) {
+        connection = hostname;
     } else {
-        ssh_session new_session;
+        uint usersize = strlen(username);
+        uint hostsize = strlen(hostname);
+        connection = calloc(sizeof(char), usersize + hostsize + 2);
+        snprintf(connection, usersize + hostsize + 2, "%s@%s", username, hostname);
+    }
+
+    ssh_session session = NULL;
+    if (ht_contains(&sessions_table, connection)) {
+        {
+            const char* fmt = "Retrieving ssh session for: %s";
+            char* message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+            sprintf(message_str, fmt, connection);
+            message(env, message_str);
+            free(message_str);
+        }
+        session = (ssh_session)ht_lookup(&sessions_table, &connection);
+        if (session == NULL) {
+            sig_err(env, "session in cache is NULL");
+            return NULL;
+        }
+    } else {
+        const char* fmt = "Connecting ssh session for: %s";
+        char* message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+        sprintf(message_str, fmt, connection);
+        message(env, message_str);
+        free(message_str);
         int rc;
 
-        new_session = ssh_new();
-        if (new_session == NULL)
+        session = ssh_new();
+        if (session == NULL)
             return NULL;
 
         int verbosity = SSH_LOG_PROTOCOL;
         int port = 22;
 
-        ssh_options_set(new_session, SSH_OPTIONS_HOST, connection);
-        ssh_options_set(new_session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
-        ssh_options_set(new_session, SSH_OPTIONS_PORT, &port);
+        ssh_options_set(session, SSH_OPTIONS_HOST, hostname);
+        ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
+        ssh_options_set(session, SSH_OPTIONS_PORT, &port);
 
-        rc = ssh_connect(new_session);
-        if (rc != SSH_OK) {
-            fprintf(stderr, "Error connecting to localhost: %s\n",
-                    ssh_get_error(new_session));
+        if (username != NULL) {
+            ssh_options_set(session, SSH_OPTIONS_USER, username);
+        }
+
+        ssh_options_parse_config(session, NULL);
+
+        rc = ssh_connect(session);
+        if (rc != SSH_OK || session == NULL) {
+            {
+                const char* fmt = "Error connecting ssh: %s";
+                char* message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+                sprintf(message_str, fmt, connection);
+                message(env, message_str);
+                free(message_str);
+            }
+            
             return NULL;
         }
 
-        if (verify_knownhost(*&new_session) != 0) {
+        {
+            const char* fmt = "Connected, verifying knownhost: %s";
+            char *message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+            sprintf(message_str, fmt, connection);
+            message(env, message_str);
+            free(message_str);
+        }
+
+        if (verify_knownhost(session) != 0) {
             return NULL;
         }
 
-        if (ssh_userauth_publickey_auto(new_session, NULL, NULL)) {
+        {
+            const char* fmt = "Connected, authenticating: %s";
+            char *message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+            sprintf(message_str, fmt, connection);
+            message(env, message_str);
+            free(message_str);
+        }
+
+        if (ssh_userauth_publickey_auto(session, NULL, NULL)) {
             return NULL;
         }
         
-        ht_insert(&sessions_table, connection, new_session);
+        {
+            const char* fmt = "Session established: %s";
+            char *message_str = calloc(sizeof(char), strlen(connection) + strlen(fmt));
+            sprintf(message_str, fmt, connection);
+            message(env, message_str);
+            free(message_str);
+        }
 
-        return new_session;
+        ht_insert(&sessions_table, connection, session);
     }
+
+    if (username != NULL) {
+        free(connection);
+    }
+    return session;
 }
 
 struct path_parts {
@@ -191,39 +265,44 @@ int get_path_parts(emacs_env *env, char* path_str, struct path_parts* parts) {
     return 0;
 }
 
-void sig_err(emacs_env *env, char* message) {
-    emacs_value data = env->make_string (env, message,
-                                         strlen (message));
-    env->non_local_exit_signal
-        (env, env->intern (env, "error"),
-         env->funcall (env, env->intern (env, "list"), 1, &data));
+void ssh_session_finalizer(void *ptr) {
+    ssh_session session = (ssh_session)ptr;
+    ssh_free(session);
 }
 
-
-static emacs_value dlsra_get_file_to_buffer (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
+static emacs_value emacs_libssh_get_session (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
     emacs_value ret;
     if (nargs != 2) {
         sig_err(env, "Incorrect args");
         return ret;
     }
 
-    ptrdiff_t full_path_size;
-    env->copy_string_contents(env, args[0], NULL, &full_path_size);
-    char* full_path = calloc(sizeof(char), full_path_size);
-    env->copy_string_contents(env, args[0], full_path, &full_path_size);
-
-    struct path_parts parts;
-    if (get_path_parts(env, full_path, &parts) < 0) {
-        sig_err(env, "Error in path parts");
-        return ret;
+    char* username = NULL;
+    if (env->is_not_nil(env, args[0])) {
+        ptrdiff_t usersize;
+        env->copy_string_contents(env, args[0], NULL, &usersize);
+        username = calloc(sizeof(char), usersize);
+        env->copy_string_contents(env, args[0], username, &usersize);
     }
 
-    ssh_session session = get_session(parts.host);
+    char* hostname = NULL;
+    if (env->is_not_nil(env, args[1])) {
+        ptrdiff_t hostsize;
+        env->copy_string_contents(env, args[1], NULL, &hostsize);
+        hostname = calloc(sizeof(char), hostsize);
+        env->copy_string_contents(env, args[1], hostname, &hostsize);
+    } else {
+        sig_err(env, "hostname nil");
+        return ret;
+    }
+    
+    ssh_session session = get_session(env, username, hostname);
     if (session == NULL) {
         sig_err(env, "Error getting session");
         return ret;
     }
 
+    ret = env->make_user_ptr(env, ssh_session_finalizer, session);
     return ret;
 }
 
@@ -234,8 +313,8 @@ int emacs_module_init(struct emacs_runtime *ert)
   ht_setup(&sessions_table, sizeof(char*), sizeof(ssh_session), 10);
   ht_reserve(&sessions_table, 100);
 
-  DEFUN("dlsra-get-file-to-buffer-c", dlsra_get_file_to_buffer, 2, 2, "Get remote file to buffer", NULL);
-  provide(env, "dlsra");
+  DEFUN("emacs-libssh-get-session", emacs_libssh_get_session, 2, 2, "Get an ssh session", NULL);
+  provide(env, "emacs-libssh");
   
   return 0;
 }
