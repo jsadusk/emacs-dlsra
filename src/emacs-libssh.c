@@ -1,26 +1,190 @@
 #include <emacs-module.h>
 #include <emacs-module-helpers.h>
 #include <libssh/libssh.h>
+#include <libssh/sftp.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 int plugin_is_GPL_compatible;
 
-void message(emacs_env *env, char* message) {
+emacs_value nilval(emacs_env *env) {
+    return env->intern(env, "nil");
+}
+
+void message(emacs_env *env, const char* message) {
     emacs_value data = env->make_string (env, message,
                                          strlen (message));
     emacs_value message_str = env->make_string (env, message, strlen(message));
     env->funcall(env, env->intern(env, "message"), 1, &message_str);
 }
 
-void sig_err(emacs_env *env, char* message) {
+void sig_err(emacs_env *env, const char* src, const char* message, const char *context) {
+    char* full_message;
+    if (context != NULL) {
+        size_t len =  strlen(src) + strlen(message) + strlen(context) + 3;
+        full_message = calloc(sizeof(char), len);
+        snprintf("%s: %s: %s", len, message, context);
+    } else {
+        size_t len =  strlen(src) + strlen(message);
+        full_message = calloc(sizeof(char), len);
+        snprintf("%s: %s", len, message, context);
+    }
     emacs_value data = env->make_string (env, message,
                                          strlen (message));
     env->non_local_exit_signal
         (env, env->intern (env, "error"),
          env->funcall (env, env->intern (env, "list"), 1, &data));
+    free(full_message);
+}
+
+char* extract_str(emacs_env *env, emacs_value path_ev) {
+    if (env->is_not_nil(env, path_ev)) {
+        ptrdiff_t size;
+        env->copy_string_contents(env, path_ev, NULL, &size);
+        char* strvalue = calloc(sizeof(char), size);
+        env->copy_string_contents(env, path_ev, strvalue, &size);
+        return strvalue;
+    } else {
+        sig_err(env, "extract_str", "string ev is nil", NULL);
+        return NULL;
+    }
+}
+
+ssh_session extract_ssh_session(emacs_env* env, emacs_value session_ev) {
+    ssh_session session = NULL;
+    if (env->is_not_nil(env, session_ev)) {
+        session = env->get_user_ptr(env, session_ev);
+        if (session == NULL) {
+            sig_err(env, "extract_ssh_session", "session ptr NULL", NULL);
+        }
+    } else {
+        sig_err(env, "extract_ssh_session", "nil session ev", NULL);
+    }
+
+    return session;
+}
+
+sftp_session extract_sftp_session(emacs_env* env, emacs_value sftp_ev) {
+    sftp_session sftp = NULL;
+    if (env->is_not_nil(env, sftp_ev)) {
+        sftp = env->get_user_ptr(env, sftp_ev);
+        if (sftp == NULL) {
+            sig_err(env, "extract_sftp_session", "sftp ptr", NULL);
+        }
+    } else {
+        sig_err(env, "extract_sftp_session", "nil sftp ev", NULL);
+    }
+
+    return sftp;
+}
+
+/*static emacs_value emacs_libssh_scp_write (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
+    emacs_value ret;
+    int rc;
+    if (nargs != 3) {
+        sig_err(env, "Incorrect args");
+        return ret;
+    }
+
+    emacs_value session_ev = args[0];
+    emacs_value path_ev = args[1];
+    emacs_value data_ev = args[2];
+
+    ssh_session session;
+    if (env->is_not_nil(env, session_ev)) {
+        session = env->get_user_ptr(env, session_ev);
+    } else {
+        sig_err("nil session");
+        return ret;
+    }
+
+    char *path = extract_str(env, path_ev);
+    if (path == NULL) {
+        sig_err("nil path");
+        return ret;
+    }
+
+    char data = extract_str(env, data_ev);
+    if (data == NULL) {
+        sig_err("nil data");
+        return ret;
+    }
+
+    ssh_scp scp = scp_new(session, SSH_SCP_WRITE, ".");
+    if (scp == NULL) {
+        sig_err("Error creating ssh");
+        return ret;
+    }
+    }*/
+
+static emacs_value emacs_libssh_sftp_insert (emacs_env *env, ptrdiff_t nargs, emacs_value argv[], void *data) {
+    const char* src = "emacs_libssh_ftp_insert";
+    fprintf(stderr, "in %s", src);
+    
+    emacs_value ret = nilval(env);
+    if (nargs != 5) {
+        sig_err(env, src, "Incorrect args", NULL);
+        return ret;
+    }
+
+    ssh_session session = extract_ssh_session(env, argv[0]);
+    if (!session)
+        return ret;
+
+    sftp_session sftp = extract_sftp_session(env, argv[1]);
+    if (!session)
+        return ret;
+
+    char *filename = extract_str(env, argv[2]);
+    if (!filename) {
+        sig_err(env, src, "nil filename", NULL);
+        return ret;
+    }
+
+    int begin = extract_integer(env, argv[3]);
+    int end = extract_integer(env, argv[4]);
+
+    sftp_file rfile = sftp_open(sftp, filename, O_RDONLY, 0);
+    if (rfile == NULL) {
+        sig_err(env, src, "Error opening remote file", ssh_get_error(session));
+        return ret;
+    }
+
+    int nbytes = 0;
+    const size_t MAX_XFER_BUF_SIZE = 16384;
+    char buffer[MAX_XFER_BUF_SIZE];
+    fprintf(stderr, "interning\n");
+    emacs_value insert_fun = env->intern(env, "insert");
+    for (;;) {
+        fprintf(stderr, "reading\n");
+        nbytes = sftp_read(rfile, buffer, MAX_XFER_BUF_SIZE);
+
+        if (nbytes == 0) {
+            fprintf(stderr, "done reading\n");
+            break; // EOF
+        } else if (nbytes < 0) {
+            fprintf(stderr, "read err\n");
+            sig_err(env, src, "Error in sftp_read", ssh_get_error(session));
+            sftp_close(rfile);
+            return ret;
+        }
+
+        fprintf(stderr, "making string\n");
+        emacs_value buffer_str = env->make_string(env, buffer, nbytes);
+        fprintf(stderr, "inserting\n");
+        env->funcall(env, insert_fun, 1, &buffer_str);
+        fprintf(stderr, "done loop\n");
+        // TODO: non-local exit check
+    }
+
+    fprintf(stderr, "closing\n");
+    sftp_close(rfile);
+    fprintf(stderr, "closed\n");
+    return ret;
 }
 
 int verify_knownhost(ssh_session session)
@@ -56,23 +220,23 @@ int verify_knownhost(ssh_session session)
  
             break;
         case SSH_KNOWN_HOSTS_CHANGED:
-            fprintf(stderr, "Host key for server changed: it is now:\n");
-            fprintf(stderr, "Public key hash");
+            fprintf(stderr,  "Host key for server changed: it is now:\n");
+            fprintf(stderr,  "Public key hash");
             ssh_print_hash(SSH_PUBLICKEY_HASH_SHA256, hash, hlen);
-            fprintf(stderr, "For security reasons, connection will be stopped\n");
+            fprintf(stderr,  "For security reasons, connection will be stopped\n");
             ssh_clean_pubkey_hash(&hash);
  
             return -1;
         case SSH_KNOWN_HOSTS_OTHER:
-            fprintf(stderr, "The host key for this server was not found but an other"
+            fprintf(stderr,  "The host key for this server was not found but an other"
                     "type of key exists.\n");
-            fprintf(stderr, "An attacker might change the default server key to"
+            fprintf(stderr,  "An attacker might change the default server key to"
                     "confuse your client into thinking the key does not exist\n");
             ssh_clean_pubkey_hash(&hash);
  
             return -1;
         case SSH_KNOWN_HOSTS_NOT_FOUND:
-            fprintf(stderr, "Could not find known host file.\n");
+            fprintf(stderr,  "Could not find known host file.\n");
             fprintf(stderr, "If you accept the host key here, the file will be"
                     "automatically created.\n");
  
@@ -248,14 +412,25 @@ int get_path_parts(emacs_env *env, char* path_str, struct path_parts* parts) {
 }
 
 void ssh_session_finalizer(void *ptr) {
+    fprintf(stderr, "session finalizer\n");
     ssh_session session = (ssh_session)ptr;
     ssh_free(session);
+    fprintf(stderr, "session finalizer done\n");
 }
 
-static emacs_value emacs_libssh_get_session (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
-    emacs_value ret;
+void sftp_session_finalizer(void *ptr) {
+    fprintf(stderr, "sftp finalizer\n");
+    sftp_session sftp = (sftp_session)ptr;
+    sftp_free(sftp);
+    fprintf(stderr, "sftp finalizer done\n");
+}
+
+static emacs_value emacs_libssh_get_ssh_session (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
+    const char* src = "emacs_libssh_get_session";
+    fprintf(stderr, "in %s", src);
+    emacs_value ret = nilval(env);
     if (nargs != 2) {
-        sig_err(env, "Incorrect args");
+        sig_err(env, src, "Incorrect args", NULL);
         return ret;
     }
 
@@ -274,13 +449,13 @@ static emacs_value emacs_libssh_get_session (emacs_env *env, ptrdiff_t nargs, em
         hostname = calloc(sizeof(char), hostsize);
         env->copy_string_contents(env, args[1], hostname, &hostsize);
     } else {
-        sig_err(env, "hostname nil");
+        sig_err(env, src, "hostname nil", NULL);
         return ret;
     }
     
     ssh_session session = get_session(env, username, hostname);
     if (session == NULL) {
-        sig_err(env, "Error getting session");
+        sig_err(env, src, "Error getting session", NULL);
         return ret;
     }
 
@@ -288,12 +463,47 @@ static emacs_value emacs_libssh_get_session (emacs_env *env, ptrdiff_t nargs, em
     return ret;
 }
 
+static emacs_value emacs_libssh_get_sftp_session (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
+    const char* src = "emacs_libssh_get_sftp";
+    fprintf(stderr, "in %s", src);
+    emacs_value ret = nilval(env);
+    if (nargs != 1) {
+        sig_err(env, src, "Incorrect args", NULL);
+        return ret;
+    }
+
+    ssh_session session = extract_ssh_session(env, args[0]);
+
+    sftp_session sftp = sftp_new(session);
+    if (sftp == NULL) {
+        sig_err(env, src, "Error allocating sftp", NULL);
+        return ret;
+    }
+
+    if (sftp_init(sftp) != SSH_OK) {
+        sig_err(env, src, "Error initializing sftp", NULL);
+        sftp_free(sftp);
+        return ret;
+    }
+
+    ret = env->make_user_ptr(env, sftp_session_finalizer, sftp);
+
+    return ret;
+}
+
+static emacs_value emacs_libssh_marker (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
+    fprintf(stderr, "marker");
+    return 0;
+}
+
 int emacs_module_init(struct emacs_runtime *ert)
 {
 
   emacs_env *env = ert->get_environment(ert);
 
-  DEFUN("emacs-libssh-get-session", emacs_libssh_get_session, 2, 2, "Get an ssh session", NULL);
+  DEFUN("emacs-libssh-get-ssh-session", emacs_libssh_get_ssh_session, 2, 2, "Get an ssh session", NULL);
+  DEFUN("emacs-libssh-get-sftp-session", emacs_libssh_get_sftp_session, 1, 1, "Get an sftp session", NULL);
+  DEFUN("emacs-libssh-sftp-insert", emacs_libssh_sftp_insert, 5, 5, "Insert a file from sftp into the current buffer", NULL);
   provide(env, "emacs-libssh");
   
   return 0;

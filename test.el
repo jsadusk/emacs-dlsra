@@ -6,7 +6,17 @@
 
 (defun test-emacs-libssh-get-session ()
   (interactive)
-  (emacs-libssh-get-session nil "dev")
+  (message "get session")
+  (setq libssh-session (emacs-libssh-get-ssh-session nil "dev"))
+  (message "get sftp")
+  (setq libssh-sftp (emacs-libssh-get-sftp-session libssh-session))
+  (message "sftp insert")
+  (emacs-libssh-sftp-insert libssh-session libssh-sftp "/home/jsadusk/.bashrc" -1 -1)
   )
 
 
+(defun test-emacs-libssh-existing-session ()
+  (interactive)
+  (message "sftp insert")
+  (emacs-libssh-sftp-insert libssh-session libssh-sftp "/home/jsadusk/.bashrc" -1 -1)
+  )
