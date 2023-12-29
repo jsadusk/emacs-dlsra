@@ -2,6 +2,7 @@
 #include <emacs-module-helpers.h>
 #include <libssh/libssh.h>
 #include <libssh/sftp.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -123,7 +124,7 @@ sftp_session extract_sftp_session(emacs_env* env, emacs_value sftp_ev) {
 
 static emacs_value emacs_libssh_sftp_insert (emacs_env *env, ptrdiff_t nargs, emacs_value argv[], void *data) {
     const char* src = "emacs_libssh_ftp_insert";
-    fprintf(stderr, "in %s", src);
+    fprintf(stderr, "in %s\n", src);
     
     emacs_value ret = nilval(env);
     if (nargs != 5) {
@@ -159,10 +160,27 @@ static emacs_value emacs_libssh_sftp_insert (emacs_env *env, ptrdiff_t nargs, em
     char buffer[MAX_XFER_BUF_SIZE];
     fprintf(stderr, "interning\n");
     emacs_value insert_fun = env->intern(env, "insert");
-    for (;;) {
-        fprintf(stderr, "reading\n");
-        nbytes = sftp_read(rfile, buffer, MAX_XFER_BUF_SIZE);
 
+    int readlen = INT_MAX;
+    if (begin > 0) {
+
+        if (sftp_seek64(rfile, begin) < 0) {
+            sig_err(env, src, "Error seeking read", NULL);
+            return ret;
+        }
+
+        if (end > 0) {
+            readlen = end - begin;
+        }
+    }
+
+    int total_bytes = 0;
+    for (;;) {
+        int remaining_bytes = readlen - total_bytes;
+        int readsize = (remaining_bytes < MAX_XFER_BUF_SIZE ?
+                        remaining_bytes : MAX_XFER_BUF_SIZE);
+        fprintf(stderr, "reading\n");
+        nbytes = sftp_read(rfile, buffer, readsize);
         if (nbytes == 0) {
             fprintf(stderr, "done reading\n");
             break; // EOF
@@ -178,7 +196,13 @@ static emacs_value emacs_libssh_sftp_insert (emacs_env *env, ptrdiff_t nargs, em
         fprintf(stderr, "inserting\n");
         env->funcall(env, insert_fun, 1, &buffer_str);
         fprintf(stderr, "done loop\n");
+        total_bytes += nbytes;
         // TODO: non-local exit check
+
+        if (total_bytes >= readlen) {
+            fprintf(stderr, "Read to readlen\n");
+            break;
+        }
     }
 
     fprintf(stderr, "closing\n");
@@ -427,7 +451,7 @@ void sftp_session_finalizer(void *ptr) {
 
 static emacs_value emacs_libssh_get_ssh_session (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
     const char* src = "emacs_libssh_get_session";
-    fprintf(stderr, "in %s", src);
+    fprintf(stderr, "in %s\n", src);
     emacs_value ret = nilval(env);
     if (nargs != 2) {
         sig_err(env, src, "Incorrect args", NULL);
@@ -465,7 +489,7 @@ static emacs_value emacs_libssh_get_ssh_session (emacs_env *env, ptrdiff_t nargs
 
 static emacs_value emacs_libssh_get_sftp_session (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
     const char* src = "emacs_libssh_get_sftp";
-    fprintf(stderr, "in %s", src);
+    fprintf(stderr, "in %s\n", src);
     emacs_value ret = nilval(env);
     if (nargs != 1) {
         sig_err(env, src, "Incorrect args", NULL);
