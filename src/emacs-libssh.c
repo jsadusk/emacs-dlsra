@@ -44,13 +44,16 @@ void sig_err(emacs_env *env, const char* src, const char* message, const char *c
 
 char* extract_str(emacs_env *env, emacs_value path_ev) {
     if (env->is_not_nil(env, path_ev)) {
+        printf("string is not nil\n");
         ptrdiff_t size;
         env->copy_string_contents(env, path_ev, NULL, &size);
         char* strvalue = calloc(sizeof(char), size);
         env->copy_string_contents(env, path_ev, strvalue, &size);
         return strvalue;
     } else {
+        printf("string is nil\n");
         sig_err(env, "extract_str", "string ev is nil", NULL);
+        printf("signaled\n");
         return NULL;
     }
 }
@@ -121,9 +124,10 @@ sftp_session extract_sftp_session(emacs_env* env, emacs_value sftp_ev) {
         return ret;
     }
     }*/
+const size_t MAX_XFER_BUF_SIZE = 16384;
 
 static emacs_value emacs_libssh_sftp_insert (emacs_env *env, ptrdiff_t nargs, emacs_value argv[], void *data) {
-    const char* src = "emacs_libssh_ftp_insert";
+    const char* src = "emacs_libssh_sftp_insert";
     fprintf(stderr, "in %s\n", src);
     
     emacs_value ret = nilval(env);
@@ -156,7 +160,6 @@ static emacs_value emacs_libssh_sftp_insert (emacs_env *env, ptrdiff_t nargs, em
     }
 
     int nbytes = 0;
-    const size_t MAX_XFER_BUF_SIZE = 16384;
     char buffer[MAX_XFER_BUF_SIZE];
     fprintf(stderr, "interning\n");
     emacs_value insert_fun = env->intern(env, "insert");
@@ -208,6 +211,89 @@ static emacs_value emacs_libssh_sftp_insert (emacs_env *env, ptrdiff_t nargs, em
     fprintf(stderr, "closing\n");
     sftp_close(rfile);
     fprintf(stderr, "closed\n");
+    return ret;
+}
+
+static emacs_value emacs_libssh_sftp_write_region (emacs_env *env, ptrdiff_t nargs, emacs_value argv[], void *data) {
+    const char* src = "emacs_libssh_sftp_write_region";
+    fprintf(stderr, "in %s\n", src);
+
+    emacs_value ret = nilval(env);
+    if (nargs != 6) {
+        sig_err(env, src, "Incorrect args", NULL);
+        return ret;
+    }
+
+    ssh_session session = extract_ssh_session(env, argv[0]);
+    if (!session)
+        return ret;
+
+    sftp_session sftp = extract_sftp_session(env, argv[1]);
+    if (!session)
+        return ret;
+
+    char *filename = extract_str(env, argv[2]);
+    if (!filename) {
+        sig_err(env, src, "nil filename", NULL);
+        return ret;
+    }
+
+    int begin = extract_integer(env, argv[3]);
+    int end = extract_integer(env, argv[4]);
+    int seek = extract_integer(env, argv[5]);
+
+
+    fprintf(stderr, "open\n");
+    sftp_file rfile = sftp_open(sftp, filename, O_WRONLY|O_CREAT|O_TRUNC, 0);
+    if (rfile == NULL) {
+        sig_err(env, src, "Error opening remote file", ssh_get_error(session));
+        return ret;
+    }
+
+    int nbytes = 0;
+    char buffer[MAX_XFER_BUF_SIZE];
+
+    fprintf(stderr, "seek\n");
+    int writelen = INT_MAX;
+    if (seek > 0) {
+        if (sftp_seek64(rfile, seek) < 0) {
+            sig_err(env, src, "Error seeking write", ssh_get_error(session));
+            return ret;
+        }
+    }
+
+    int cur_byte = begin;
+    fprintf(stderr, "intern\n");
+    emacs_value buffer_substring_no_properties = env->intern(env, "buffer-substring-no-properties");
+    for (;;) {
+        int remaining = end - cur_byte;
+        int writesize = remaining < MAX_XFER_BUF_SIZE ? remaining : MAX_XFER_BUF_SIZE;
+
+        fprintf(stderr, "makeint\n");
+        emacs_value args[2] = {env->make_integer(env, cur_byte), env->make_integer(env, cur_byte + writesize)};
+        fprintf(stderr, "substring\n");
+        emacs_value substring_ev = env->funcall(env, buffer_substring_no_properties, 2, args);
+        fprintf(stderr, "extract substr\n");
+        char *substring = extract_str(env, substring_ev);
+        if (substring == NULL) {
+            printf("null substring\n");
+            return ret;
+        }
+
+        fprintf(stderr, "write %d bytes\n", writesize);
+        int written = sftp_write(rfile, substring, writesize);
+        if (written < 0) {
+            sig_err(env, src, "Error writing to sftp", ssh_get_error(session));
+            return ret;
+        }
+        
+
+        cur_byte += written;
+        if (cur_byte >= end) {
+            break;
+        }
+    }
+    
     return ret;
 }
 
@@ -525,6 +611,7 @@ int emacs_module_init(struct emacs_runtime *ert)
 
   emacs_env *env = ert->get_environment(ert);
 
+  DEFUN("emacs-libssh-sftp-write-region", emacs_libssh_sftp_write_region, 6, 6, "Write a region from the current buffer into an sftp file", NULL);
   DEFUN("emacs-libssh-get-ssh-session", emacs_libssh_get_ssh_session, 2, 2, "Get an ssh session", NULL);
   DEFUN("emacs-libssh-get-sftp-session", emacs_libssh_get_sftp_session, 1, 1, "Get an sftp session", NULL);
   DEFUN("emacs-libssh-sftp-insert", emacs_libssh_sftp_insert, 5, 5, "Insert a file from sftp into the current buffer", NULL);

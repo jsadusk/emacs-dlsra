@@ -24,3 +24,10 @@
   (message "sftp insert 20 - 500")
   (emacs-libssh-sftp-insert libssh-session libssh-sftp "/home/jsadusk/.bashrc" 23 590)
   )
+
+(defun test-emacs-libssh-write-region ()
+  (interactive)
+
+  (message "sftp write 20 - 500")
+  (emacs-libssh-sftp-write-region libssh-session libssh-sftp "/home/jsadusk/test_libssh.txt" 20 500 0)
+  )
