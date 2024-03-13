@@ -1,0 +1,17 @@
+[package]
+name = "tramp-libssh"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+emacs = "0.18.0"
+emacs-rs-module = "0.18.0"
+libssh-rs = "0.2.2"
+thread_local = "1.1.7"
+
+[dev-dependencies]
+emacs-rs-module = {version = "0.18.0"}

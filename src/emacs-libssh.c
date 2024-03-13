@@ -244,7 +244,7 @@ static emacs_value emacs_libssh_sftp_write_region (emacs_env *env, ptrdiff_t nar
 
 
     fprintf(stderr, "open\n");
-    sftp_file rfile = sftp_open(sftp, filename, O_WRONLY|O_CREAT|O_TRUNC, 0);
+    sftp_file rfile = sftp_open(sftp, filename, O_WRONLY|O_CREAT|O_TRUNC, 0666);
     if (rfile == NULL) {
         sig_err(env, src, "Error opening remote file", ssh_get_error(session));
         return ret;

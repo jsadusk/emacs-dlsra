@@ -13,3 +13,8 @@
 /.cache
 /build
 /compile_commands.json
+
+# Added by cargo
+
+/target
+/Cargo.lock
