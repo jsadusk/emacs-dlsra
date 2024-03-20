@@ -8,8 +8,10 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+anyhow = "1.0.81"
 emacs = "0.18.0"
 emacs-rs-module = "0.18.0"
+libc = "0.2.153"
 libssh-rs = "0.2.2"
 thread_local = "1.1.7"
 
