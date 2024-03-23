@@ -17,7 +17,8 @@ emacs::use_symbols! {
     car cdr nth
     tramp_dissect_file_name
     read_passwd read_string
-    insert set_buffer current_buffer generate_new_buffer kill_buffer
+    insert replace_buffer_contents
+    set_buffer current_buffer generate_new_buffer kill_buffer
 }
 
 #[emacs::module(name = "tramp-libssh")]
@@ -31,6 +32,8 @@ struct DissectedFilename {
 }
 
 trait LocalEnv<'a> {
+    fn nil(&self) -> Value<'a>;
+    fn t(&self) -> Value<'a>;
     fn car(&self, list: Value<'a>) -> Result<Value<'a>>;
     fn cdr(&self, list: Value<'a>) -> Result<Value<'a>>;
     fn nth(&self, idx: usize, list: Value<'a>) -> Result<Value<'a>>;
@@ -39,6 +42,7 @@ trait LocalEnv<'a> {
     fn read_passwd(&self, prompt: &str, confirm: bool) -> Result<String>;
     fn read_string(&self, prompt: &str) -> Result<String>;
     fn insert(&self, text: &str) -> Result<()>;
+    fn replace_buffer_contents(&self, other_buf: Value<'a>) -> Result<()>;
     fn set_buffer(&self, buffer: Value<'a>) -> Result<()>;
     fn current_buffer(&self) -> Result<Value<'a>>;    
     fn generate_new_buffer(&self, name: &str) -> Result<Value<'a>>;
@@ -46,6 +50,14 @@ trait LocalEnv<'a> {
 }
 
 impl<'a> LocalEnv<'a> for &'a Env {
+    fn nil(&self) -> Value<'a> {
+        nil.bind(self)
+    }
+
+    fn t(&self) -> Value<'a> {
+        t.bind(self)
+    }
+    
     fn car(&self, list: Value<'a>) -> Result<Value<'a>> {
         self.call(car, &[list])
     }
@@ -97,6 +109,11 @@ impl<'a> LocalEnv<'a> for &'a Env {
         Ok(())
     }
 
+    fn replace_buffer_contents(&self, other_buf: Value<'a>) -> Result<()> {
+        self.call(replace_buffer_contents, &[other_buf])?;
+        Ok(())
+    }
+    
     fn set_buffer(&self, buffer: Value<'a>) -> Result<()> {
         self.call(set_buffer, &[buffer])?;
         Ok(())
@@ -169,6 +186,15 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
         rfile.seek(SeekFrom::Start(off as u64))?;
     }
 
+    let (orig_buf, tmp_buf) = if let Some(_) = replace {
+        let tmp_buf = env.generate_new_buffer("*tmp*")?;
+        let orig_buf = env.current_buffer()?;
+        env.set_buffer(tmp_buf)?;
+        (orig_buf, tmp_buf)
+    } else {
+        (env.nil(), env.nil())
+    };
+    
     let mut total_bytes: usize = 0;
     let mut buf = [0; 16384];
     loop {
@@ -195,6 +221,12 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
         env.insert(&std::str::from_utf8(&buf[0 .. bytes])?)?;
 
         total_bytes += bytes;
+    }
+
+    if let Some(_) = replace {
+        env.set_buffer(orig_buf)?;
+        env.replace_buffer_contents(tmp_buf)?;
+        env.kill_buffer(tmp_buf)?;
     }
         
     Ok(())
