@@ -43,7 +43,7 @@
   (interactive)
   (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
   (message (prin1-to-string (tramp-dissect-file-name "/ssh:joe@sadusk.com:/home/joe/data.txt")))
-  (tramp-libssh-insert-file-contents1 "/ssh:joe@sadusk.com:/home/joe/data.txt" nil nil nil nil)
+  (tramp-libssh-insert-file-contents1 "/ssh:joe@sadusk.com:/home/joe/data.txt" nil 4 15 nil)
   )
 
 ;(message (read-string "hello: " nil nil nil nil))\

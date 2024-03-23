@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::io::{Seek, SeekFrom, Read};
 use std::rc::Rc;
 use emacs::{defun, CallEnv, Env, IntoLisp, Result, Value, FromLisp};
 
@@ -7,7 +8,6 @@ emacs::plugin_is_GPL_compatible!();
 use libssh_rs::{*, sys::{SSH_ADDRSTRLEN, sftp_init}};
 use anyhow::bail;
 use libc::O_RDONLY;
-use std::io::Read;
 
 /*thread_local! {
     static SESSIONS: RefCell<HashMap<String, Session>>;
@@ -27,6 +27,10 @@ struct LocalEnv<'a> {
     read_passwd_v: Value<'a>,
     read_string_v: Value<'a>,
     insert_v: Value<'a>,
+    set_buffer_v: Value<'a>,
+    current_buffer_v: Value<'a>,
+    generate_new_buffer_v: Value<'a>,
+    kill_buffer_v: Value<'a>,
 }
 
 struct DissectedFilename {
@@ -49,6 +53,10 @@ impl<'a> LocalEnv<'a> {
             read_passwd_v: env.intern("read-passwd")?,
             read_string_v: env.intern("read-string")?,
             insert_v: env.intern("insert")?,
+            set_buffer_v: env.intern("set-buffer")?,
+            current_buffer_v: env.intern("current-buffer")?,
+            generate_new_buffer_v: env.intern("generate-new-buffer")?,
+            kill_buffer_v: env.intern("kill-buffer")?,
         })
     }
 
@@ -114,6 +122,24 @@ impl<'a> LocalEnv<'a> {
         self.env.call(self.insert_v, &[text.into_lisp(&self.env)?])?;
         Ok(())
     }
+
+    pub fn set_buffer(&self, buffer: Value<'a>) -> Result<()> {
+        self.env.call(self.set_buffer_v, &[buffer])?;
+        Ok(())
+    }
+
+    pub fn current_buffer(&self) -> Result<Value<'a>> {
+        self.env.call(self.current_buffer_v, &[])
+    }
+
+    pub fn generate_new_buffer(&self, name: &str) -> Result<Value<'a>> {
+        self.env.call(self.generate_new_buffer_v, &[name.into_lisp(self.env)?])
+    }
+
+    pub fn kill_buffer(&self, buffer: Value<'a>) -> Result<()> {
+        self.env.call(self.kill_buffer_v, &[buffer])?;
+        Ok(())
+    }
 }
 
 fn get_connection(user: &str, host: &str, env: &LocalEnv) -> Result<Session> {
@@ -154,7 +180,7 @@ fn get_connection(user: &str, host: &str, env: &LocalEnv) -> Result<Session> {
 }
 
 #[defun]
-fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin: Option<i64>, end: Option<i64>, replace: Option<Value>) -> Result<()> {
+fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin: Option<usize>, end: Option<usize>, replace: Option<Value>) -> Result<()> {
     let env = LocalEnv::new(env)?;
     env.message("insert-file-contents3")?;
     let dissected = env.tramp_dissect_file_name(filename)?;
@@ -166,16 +192,36 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
 
     let sftp_sess = session.sftp()?;
     let mut rfile = sftp_sess.open(&dissected.filename, O_RDONLY, 0)?;
+    if let Some(off) = begin {
+        rfile.seek(SeekFrom::Start(off as u64))?;
+    }
 
+    let mut total_bytes: usize = 0;
+    let mut buf = [0; 16384];
     loop {
-        let mut buf = [0; 16384];
+        let bufslice: &mut [u8] = if let Some(end) = end {
+            if total_bytes >= end {
+                break;
+            }
 
-        let bytes = rfile.read(&mut buf)?;
+            let remaining: usize = end - total_bytes;
+            if remaining < 16384 {
+                &mut buf[0 .. remaining]
+            } else {
+                &mut buf[..]
+            }
+        } else {
+            &mut buf[..]
+        };
+        
+        let bytes = rfile.read(bufslice)?;
         if bytes == 0 {
             break;
         }
         
         env.insert(&std::str::from_utf8(&buf[0 .. bytes])?)?;
+
+        total_bytes += bytes;
     }
         
     Ok(())
@@ -189,3 +235,5 @@ mod tests {
     fn it_works() {
     }
 }
+
+
