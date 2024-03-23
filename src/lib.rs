@@ -12,26 +12,16 @@ use libc::O_RDONLY;
 /*thread_local! {
     static SESSIONS: RefCell<HashMap<String, Session>>;
 }*/
+emacs::use_symbols! {
+    nil t
+    car cdr nth
+    tramp_dissect_file_name
+    read_passwd read_string
+    insert set_buffer current_buffer generate_new_buffer kill_buffer
+}
 
 #[emacs::module(name = "tramp-libssh")]
 fn init(_: &Env) -> Result<()> { Ok(()) }
-
-struct LocalEnv<'a> {
-    pub env: &'a Env,
-    nil_v: Value<'a>,
-    t_v: Value<'a>,
-    car_v: Value<'a>,
-    cdr_v: Value<'a>,
-    nth_v: Value<'a>,
-    tramp_dissect_file_name_v: Value<'a>,
-    read_passwd_v: Value<'a>,
-    read_string_v: Value<'a>,
-    insert_v: Value<'a>,
-    set_buffer_v: Value<'a>,
-    current_buffer_v: Value<'a>,
-    generate_new_buffer_v: Value<'a>,
-    kill_buffer_v: Value<'a>,
-}
 
 struct DissectedFilename {
     protocol: String,
@@ -40,58 +30,42 @@ struct DissectedFilename {
     filename: String,
 }
 
-impl<'a> LocalEnv<'a> {
-    pub fn new(env: &'a Env) -> Result<Self> {
-        Ok(Self {
-            env: env,
-            nil_v: env.intern("nil")?,
-            t_v: env.intern("t")?,
-            car_v: env.intern("car")?,
-            cdr_v: env.intern("cdr")?,
-            nth_v: env.intern("nth")?,
-            tramp_dissect_file_name_v: env.intern("tramp-dissect-file-name")?,
-            read_passwd_v: env.intern("read-passwd")?,
-            read_string_v: env.intern("read-string")?,
-            insert_v: env.intern("insert")?,
-            set_buffer_v: env.intern("set-buffer")?,
-            current_buffer_v: env.intern("current-buffer")?,
-            generate_new_buffer_v: env.intern("generate-new-buffer")?,
-            kill_buffer_v: env.intern("kill-buffer")?,
-        })
+trait LocalEnv<'a> {
+    fn car(&self, list: Value<'a>) -> Result<Value<'a>>;
+    fn cdr(&self, list: Value<'a>) -> Result<Value<'a>>;
+    fn nth(&self, idx: usize, list: Value<'a>) -> Result<Value<'a>>;
+    fn tramp_dissect_file_name_el(&self, filename: Value<'a>) -> Result<Value<'a>>;
+    fn tramp_dissect_file_name(&self, filename: Value<'a>) -> Result<DissectedFilename>;
+    fn read_passwd(&self, prompt: &str, confirm: bool) -> Result<String>;
+    fn read_string(&self, prompt: &str) -> Result<String>;
+    fn insert(&self, text: &str) -> Result<()>;
+    fn set_buffer(&self, buffer: Value<'a>) -> Result<()>;
+    fn current_buffer(&self) -> Result<Value<'a>>;    
+    fn generate_new_buffer(&self, name: &str) -> Result<Value<'a>>;
+    fn kill_buffer(&self, buffer: Value<'a>) -> Result<()>;
+}
+
+impl<'a> LocalEnv<'a> for &'a Env {
+    fn car(&self, list: Value<'a>) -> Result<Value<'a>> {
+        self.call(car, &[list])
     }
 
-    pub fn nil(&self) -> Value<'a> {
-        self.nil_v.clone()
-    }
-
-    pub fn car(&self, list: Value<'a>) -> Result<Value<'a>> {
-        self.env.call(self.car_v, &[list])
-    }
-
-    pub fn cdr(&self, list: Value<'a>) -> Result<Value<'a>> {
-        self.env.call(self.cdr_v, &[list])
+    fn cdr(&self, list: Value<'a>) -> Result<Value<'a>> {
+        self.call(cdr, &[list])
     }
     
-    pub fn nth(&self, idx: usize, list: Value<'a>) -> Result<Value<'a>> {
-        self.env.call(self.nth_v, &[idx.into_lisp(self.env)?, list])
+    fn nth(&self, idx: usize, list: Value<'a>) -> Result<Value<'a>> {
+        self.call(nth, &[idx.into_lisp(self)?, list])
     }
 
-    pub fn tramp_dissect_file_name_el(&self, filename: Value<'a>) -> Result<Value<'a>> {
-        self.env.call(self.tramp_dissect_file_name_v, &[filename])
+    fn tramp_dissect_file_name_el(&self, filename: Value<'a>) -> Result<Value<'a>> {
+        self.call(tramp_dissect_file_name, &[filename])
     }
 
-    pub fn message(&self, msg: &str) -> Result<Value<'a>> {
-        self.env.message(msg)
-    }
-
-    pub fn intern(&self, symbol: &str) -> Result<Value<'a>> {
-        self.env.intern(symbol)
-    }
-
-    pub fn tramp_dissect_file_name(&self, filename: Value<'a>) -> Result<DissectedFilename> {
-        self.env.message("dissecting")?;
+    fn tramp_dissect_file_name(&self, filename: Value<'a>) -> Result<DissectedFilename> {
+        self.message("dissecting")?;
         let dissected_v = self.tramp_dissect_file_name_el(filename)?;
-        self.env.message("extracting")?;
+        self.message("extracting")?;
         
         Ok(
             DissectedFilename {
@@ -103,46 +77,46 @@ impl<'a> LocalEnv<'a> {
         )
     }
 
-    pub fn read_passwd(&self, prompt: &str, confirm: bool) -> Result<String> {
+    fn read_passwd(&self, prompt: &str, confirm: bool) -> Result<String> {
         let confirm = if confirm {
-            self.t_v
+            t
         } else {
-            self.nil_v
+            nil
         };
-        let passwd_v = self.env.call(self.read_passwd_v, &[prompt.into_lisp(self.env)?, confirm])?;
+        let passwd_v = self.call(read_passwd, &[prompt.into_lisp(self)?, confirm.bind(self)])?;
         String::from_lisp(passwd_v)
     }
 
-    pub fn read_string(&self, prompt: &str) -> Result<String> {
-        let result_v = self.env.call(self.read_string_v, &[prompt.into_lisp(self.env)?])?;
+    fn read_string(&self, prompt: &str) -> Result<String> {
+        let result_v = self.call(read_string, &[prompt.into_lisp(self)?])?;
         String::from_lisp(result_v)
     }
 
-    pub fn insert(&self, text: &str) -> Result<()> {
-        self.env.call(self.insert_v, &[text.into_lisp(&self.env)?])?;
+    fn insert(&self, text: &str) -> Result<()> {
+        self.call(insert, &[text.into_lisp(self)?])?;
         Ok(())
     }
 
-    pub fn set_buffer(&self, buffer: Value<'a>) -> Result<()> {
-        self.env.call(self.set_buffer_v, &[buffer])?;
+    fn set_buffer(&self, buffer: Value<'a>) -> Result<()> {
+        self.call(set_buffer, &[buffer])?;
         Ok(())
     }
 
-    pub fn current_buffer(&self) -> Result<Value<'a>> {
-        self.env.call(self.current_buffer_v, &[])
+    fn current_buffer(&self) -> Result<Value<'a>> {
+        self.call(current_buffer, &[])
     }
 
-    pub fn generate_new_buffer(&self, name: &str) -> Result<Value<'a>> {
-        self.env.call(self.generate_new_buffer_v, &[name.into_lisp(self.env)?])
+    fn generate_new_buffer(&self, name: &str) -> Result<Value<'a>> {
+        self.call(generate_new_buffer, &[name.into_lisp(self)?])
     }
 
-    pub fn kill_buffer(&self, buffer: Value<'a>) -> Result<()> {
-        self.env.call(self.kill_buffer_v, &[buffer])?;
+    fn kill_buffer(&self, buffer: Value<'a>) -> Result<()> {
+        self.call(kill_buffer, &[buffer])?;
         Ok(())
     }
 }
 
-fn get_connection(user: &str, host: &str, env: &LocalEnv) -> Result<Session> {
+fn get_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
     let session = Session::new()?;
     /*unsafe {
         //let env: *const LocalEnv = env as *const LocalEnv;
@@ -181,7 +155,6 @@ fn get_connection(user: &str, host: &str, env: &LocalEnv) -> Result<Session> {
 
 #[defun]
 fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin: Option<usize>, end: Option<usize>, replace: Option<Value>) -> Result<()> {
-    let env = LocalEnv::new(env)?;
     env.message("insert-file-contents3")?;
     let dissected = env.tramp_dissect_file_name(filename)?;
     env.message("formatting")?;
