@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{Seek, SeekFrom, Read};
 use std::rc::Rc;
 use emacs::{defun, CallEnv, Env, IntoLisp, Result, Value, FromLisp};
@@ -9,9 +10,10 @@ use libssh_rs::{*, sys::{SSH_ADDRSTRLEN, sftp_init}};
 use anyhow::bail;
 use libc::O_RDONLY;
 
-/*thread_local! {
-    static SESSIONS: RefCell<HashMap<String, Session>>;
-}*/
+thread_local! {
+    static SESSIONS: RefCell<HashMap<String, Rc<Session>>> = RefCell::new(HashMap::new());
+}
+
 emacs::use_symbols! {
     nil t
     car cdr nth
@@ -75,9 +77,7 @@ impl<'a> LocalEnv<'a> for &'a Env {
     }
 
     fn tramp_dissect_file_name(&self, filename: Value<'a>) -> Result<DissectedFilename> {
-        self.message("dissecting")?;
         let dissected_v = self.tramp_dissect_file_name_el(filename)?;
-        self.message("extracting")?;
         
         Ok(
             DissectedFilename {
@@ -133,7 +133,21 @@ impl<'a> LocalEnv<'a> for &'a Env {
     }
 }
 
-fn get_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
+fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
+    let connection_str = format!("{}@{}", user, host);
+    SESSIONS.with(|sessions| {
+        let mut sessions = sessions.try_borrow_mut()?;
+        if let Some(session) = sessions.get(&connection_str) {
+            env.message("Cached session")?;
+            Ok(session.clone())
+        } else {
+            let session = init_connection(user, host, env)?;
+            Ok(sessions.insert(connection_str, Rc::new(session)).unwrap())
+        }
+    })
+}
+
+fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
     let session = Session::new()?;
     /*unsafe {
         //let env: *const LocalEnv = env as *const LocalEnv;
@@ -166,19 +180,17 @@ fn get_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
     }
 
     session.userauth_public_key_auto(None, None)?;
+    env.message("Connected session")?;
 
     Ok(session)
 }
 
 #[defun]
 fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin: Option<usize>, end: Option<usize>, replace: Option<Value>) -> Result<()> {
-    env.message("insert-file-contents3")?;
     let dissected = env.tramp_dissect_file_name(filename)?;
-    env.message("formatting")?;
     env.message(&format!("filename {} has username {} host {} and file {}", String::from_lisp(filename)?, dissected.user, dissected.host, dissected.filename))?;
 
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
-    env.message("Connected session")?;
 
     let sftp_sess = session.sftp()?;
     let mut rfile = sftp_sess.open(&dissected.filename, O_RDONLY, 0)?;
