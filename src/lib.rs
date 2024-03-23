@@ -142,12 +142,14 @@ fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
                 env.message("Cached session")?;
                 Ok(session.clone())
             } else {
-                let session = init_connection(user, host, env)?;
-                Ok(sessions.insert(connection_str, Rc::new(session)).unwrap())
+                let session = Rc::new(init_connection(user, host, env)?);
+                sessions.insert(connection_str, session.clone());
+                Ok(session)
             }
         } else {
-            let session = init_connection(user, host, env)?;
-            Ok(sessions.insert(connection_str, Rc::new(session)).unwrap())
+            let session = Rc::new(init_connection(user, host, env)?);
+            sessions.insert(connection_str, session.clone());
+            Ok(session)
         }
     })
 }
