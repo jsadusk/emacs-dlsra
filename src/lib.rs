@@ -138,8 +138,13 @@ fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
     SESSIONS.with(|sessions| {
         let mut sessions = sessions.try_borrow_mut()?;
         if let Some(session) = sessions.get(&connection_str) {
-            env.message("Cached session")?;
-            Ok(session.clone())
+            if session.is_connected() {
+                env.message("Cached session")?;
+                Ok(session.clone())
+            } else {
+                let session = init_connection(user, host, env)?;
+                Ok(sessions.insert(connection_str, Rc::new(session)).unwrap())
+            }
         } else {
             let session = init_connection(user, host, env)?;
             Ok(sessions.insert(connection_str, Rc::new(session)).unwrap())
