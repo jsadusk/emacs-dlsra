@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{Seek, SeekFrom, Read};
+use std::io::{Seek, SeekFrom, Read, Write};
 use std::rc::Rc;
 use emacs::{defun, CallEnv, Env, IntoLisp, Result, Value, FromLisp};
 
@@ -8,11 +8,13 @@ emacs::plugin_is_GPL_compatible!();
 
 use libssh_rs::{*, sys::{SSH_ADDRSTRLEN, sftp_init}};
 use anyhow::bail;
-use libc::O_RDONLY;
+use libc::{O_RDONLY, O_WRONLY, O_APPEND, O_CREAT, O_TRUNC};
 
 thread_local! {
     static SESSIONS: RefCell<HashMap<String, Rc<Session>>> = RefCell::new(HashMap::new());
 }
+
+const BLOCKSIZE: usize = 163840;
 
 emacs::use_symbols! {
     nil t
@@ -21,6 +23,8 @@ emacs::use_symbols! {
     read_passwd read_string
     insert replace_buffer_contents
     set_buffer current_buffer generate_new_buffer kill_buffer
+    buffer_substring_no_properties
+    buffer_size
 }
 
 #[emacs::module(name = "tramp-libssh")]
@@ -49,6 +53,8 @@ trait LocalEnv<'a> {
     fn current_buffer(&self) -> Result<Value<'a>>;    
     fn generate_new_buffer(&self, name: &str) -> Result<Value<'a>>;
     fn kill_buffer(&self, buffer: Value<'a>) -> Result<()>;
+    fn buffer_substring_no_properties(&self, start: usize, end: usize) -> Result<String>;
+    fn buffer_size(&self) -> Result<usize>;
 }
 
 impl<'a> LocalEnv<'a> for &'a Env {
@@ -131,6 +137,17 @@ impl<'a> LocalEnv<'a> for &'a Env {
         self.call(kill_buffer, &[buffer])?;
         Ok(())
     }
+
+    fn buffer_substring_no_properties(&self, begin: usize, end: usize) -> Result<String> {
+        String::from_lisp(self.call(buffer_substring_no_properties,
+                                    &[begin.into_lisp(self)?,
+                                      end.into_lisp(self)?])?)
+    }
+
+    fn buffer_size(&self) -> Result<usize> {
+        usize::from_lisp(self.call(buffer_size, &[])?)
+    }
+
 }
 
 fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
@@ -193,10 +210,80 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
 }
 
 #[defun]
+fn write_region(env: &Env, start: Option<Value>, end: Option<Value>, filename: Value,
+                append: Option<Value>, visit: Option<Value>, lockname: Option<Value>, mustbenew: Option<Value>) -> Result<()> {
+    let dissected = env.tramp_dissect_file_name(filename)?;
+
+    let (str_contents, begin) = if let Some(start) = start {
+        (String::from_lisp(start).ok(), usize::from_lisp(start).unwrap_or(0))
+    } else {
+        (None, 0)
+    };
+
+    let end = if !str_contents.is_none() {
+        str_contents.as_ref().unwrap().len()
+    } else if start.is_none() || end.is_none() {
+        env.buffer_size()?
+    } else {
+        usize::from_lisp(end.unwrap())?
+    };
+
+    let (seek, append_file) = if let Some(append_val) = append {
+        if let Some(seek) = u64::from_lisp(append_val).ok() {
+            (Some(seek), false)
+        } else {
+            (None, true)
+        }
+    } else {
+        (None, false)
+    };
+
+    let session = get_connection(&dissected.user, &dissected.host, &env)?;
+    let sftp_sess = session.sftp()?;
+    let mut open_mode = O_WRONLY|O_CREAT;
+    if append_file {
+        open_mode |= O_APPEND;
+    } else if begin == 0 {
+        open_mode |= O_TRUNC;
+    }
+    let mut rfile = sftp_sess.open(&dissected.filename, open_mode, 0o644)?;
+
+    if !append_file {
+        if let Some(seek) = seek {
+            rfile.seek(SeekFrom::Start(seek))?;
+        }
+    }
+    
+    if let Some(str_contents) = str_contents {
+        rfile.write(str_contents.as_bytes())?;
+    } else {
+        let mut cur_byte = begin + 1;
+
+        loop {
+            let substring_end = if end - cur_byte > BLOCKSIZE {
+                cur_byte + BLOCKSIZE
+            } else {
+                end
+            };
+
+            let bufstring = env.buffer_substring_no_properties(cur_byte, substring_end)?;
+            let written = rfile.write(bufstring.as_bytes())?;
+            cur_byte += written;
+
+            if cur_byte == end {
+                break
+            } else if cur_byte > end {
+                bail!("Wrote too much?");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[defun]
 fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin: Option<usize>, end: Option<usize>, replace: Option<Value>) -> Result<()> {
     let dissected = env.tramp_dissect_file_name(filename)?;
-    env.message(&format!("filename {} has username {} host {} and file {}", String::from_lisp(filename)?, dissected.user, dissected.host, dissected.filename))?;
-
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
 
     let sftp_sess = session.sftp()?;
@@ -215,7 +302,7 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
     };
     
     let mut total_bytes: usize = 0;
-    let mut buf = [0; 16384];
+    let mut buf = [0; BLOCKSIZE];
     loop {
         let bufslice: &mut [u8] = if let Some(end) = end {
             if total_bytes >= end {
@@ -223,7 +310,7 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
             }
 
             let remaining: usize = end - total_bytes;
-            if remaining < 16384 {
+            if remaining < BLOCKSIZE {
                 &mut buf[0 .. remaining]
             } else {
                 &mut buf[..]

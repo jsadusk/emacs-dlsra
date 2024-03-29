@@ -39,17 +39,29 @@
 
 (add-to-list 'load-path "~/work/tramp-libssh")
 (require 'rs-module)
-(defun test-libssh ()
+(defun test-libssh-insert-from-file ()
   (interactive)
   (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
   (message (prin1-to-string (tramp-dissect-file-name "/ssh:joe@sadusk.com:/home/joe/data.txt")))
   (tramp-libssh-insert-file-contents1 "/ssh:joe@sadusk.com:/home/joe/data.txt" nil 4 15 nil)
   )
-(defun test-libssh-replace ()
+(defun test-libssh-replace-from-file ()
   (interactive)
   (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
   (message (prin1-to-string (tramp-dissect-file-name "/ssh:joe@sadusk.com:/home/joe/data.txt")))
   (tramp-libssh-insert-file-contents1 "/ssh:joe@sadusk.com:/home/joe/data.txt" nil 4 15 t)
+  )
+
+(defun test-libssh-write-buffer ()
+  (interactive)
+  (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+  (tramp-libssh-write-region nil nil "/ssh:joe@sadusk.com:/home/joe/buffer.txt" nil nil nil nil)
+  )
+
+(defun test-libssh-write-buffer-append ()
+  (interactive)
+  (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+  (tramp-libssh-write-region nil nil "/ssh:joe@sadusk.com:/home/joe/buffer.txt" t nil nil nil)
   )
 
 ;(message (read-string "hello: " nil nil nil nil))\
