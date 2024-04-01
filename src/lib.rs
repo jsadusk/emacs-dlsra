@@ -1,14 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{Seek, SeekFrom, Read, Write};
+use std::io::{Seek, SeekFrom, Read, Write, ErrorKind};
 use std::rc::Rc;
 use emacs::{defun, CallEnv, Env, IntoLisp, Result, Value, FromLisp};
 
 emacs::plugin_is_GPL_compatible!();
 
-use libssh_rs::{*, sys::{SSH_ADDRSTRLEN, sftp_init}};
+use libssh_rs::*;
 use anyhow::bail;
-use libc::{O_RDONLY, O_WRONLY, O_APPEND, O_CREAT, O_TRUNC};
 
 thread_local! {
     static SESSIONS: RefCell<HashMap<String, Rc<Session>>> = RefCell::new(HashMap::new());
@@ -31,6 +30,7 @@ emacs::use_symbols! {
 fn init(_: &Env) -> Result<()> { Ok(()) }
 
 struct DissectedFilename {
+    full_name: String,
     protocol: String,
     user: String,
     host: String,
@@ -55,6 +55,7 @@ trait LocalEnv<'a> {
     fn kill_buffer(&self, buffer: Value<'a>) -> Result<()>;
     fn buffer_substring_no_properties(&self, start: usize, end: usize) -> Result<String>;
     fn buffer_size(&self) -> Result<usize>;
+    fn default_directory(&self) -> Result<DissectedFilename>;
 }
 
 impl<'a> LocalEnv<'a> for &'a Env {
@@ -87,6 +88,7 @@ impl<'a> LocalEnv<'a> for &'a Env {
         
         Ok(
             DissectedFilename {
+                full_name: String::from_lisp(filename)?,
                 protocol: String::from_lisp(self.nth(1, dissected_v)?)?,
                 user: String::from_lisp(self.nth(2, dissected_v)?)?,
                 host: String::from_lisp(self.nth(4, dissected_v)?)?,
@@ -146,6 +148,10 @@ impl<'a> LocalEnv<'a> for &'a Env {
 
     fn buffer_size(&self) -> Result<usize> {
         usize::from_lisp(self.call(buffer_size, &[])?)
+    }
+
+    fn default_directory(&self) -> Result<DissectedFilename> {
+        self.tramp_dissect_file_name(self.intern("default-directory")?)
     }
 
 }
@@ -240,11 +246,11 @@ fn write_region(env: &Env, start: Option<Value>, end: Option<Value>, filename: V
 
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp_sess = session.sftp()?;
-    let mut open_mode = O_WRONLY|O_CREAT;
+    let mut open_mode = OpenFlags::READ_ONLY|OpenFlags::CREATE;
     if append_file {
-        open_mode |= O_APPEND;
+        open_mode |= OpenFlags::APPEND;
     } else if begin == 0 {
-        open_mode |= O_TRUNC;
+        open_mode |= OpenFlags::TRUNCATE;
     }
     let mut rfile = sftp_sess.open(&dissected.filename, open_mode, 0o644)?;
 
@@ -287,7 +293,7 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
 
     let sftp_sess = session.sftp()?;
-    let mut rfile = sftp_sess.open(&dissected.filename, O_RDONLY, 0)?;
+    let mut rfile = sftp_sess.open(&dissected.filename, OpenFlags::READ_ONLY, 0)?;
     if let Some(off) = begin {
         rfile.seek(SeekFrom::Start(off as u64))?;
     }
@@ -336,6 +342,25 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
     }
         
     Ok(())
+}
+
+#[defun]
+fn file_exists_p<'a>(env: &'a Env, filename: Value<'a>)  -> Result<Value<'a>> {
+    let dissected = env.tramp_dissect_file_name(filename)?;
+    let session = get_connection(&dissected.user, &dissected.host, &env)?;
+    let sftp = session.sftp()?;
+    let res = sftp.open(&dissected.filename, OpenFlags::READ_ONLY, 0);
+    match res {
+        Ok(_) => Ok(t.bind(env)),
+        Err(libssh_rs::Error::Sftp(e)) => {
+            let e: std::io::Error = e.into();
+            match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(nil.bind(env)),
+                _ => Err(e.into())
+            }
+        },
+        Err(e) => Err(e.into())
+    }
 }
 
 #[cfg(test)]

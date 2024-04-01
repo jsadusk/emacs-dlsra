@@ -64,5 +64,12 @@
   (tramp-libssh-write-region nil nil "/ssh:joe@sadusk.com:/home/joe/buffer.txt" t nil nil nil)
   )
 
+(defun test-libssh-file-exists ()
+  (interactive)
+  (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+  (message (prin1-to-string (tramp-libssh-file-exists-p "/ssh:joe@sadusk.com:/home/joe/buffer.txt")))
+  (message (prin1-to-string (tramp-libssh-file-exists-p "/ssh:joe@sadusk.com:/home/joe/blarh.txt")))
+  )
+
 ;(message (read-string "hello: " nil nil nil nil))\
 ;(message (read-passwd "asdf: " 't))
