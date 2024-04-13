@@ -1,13 +1,13 @@
+use emacs::{defun, Env, FromLisp, IntoLisp, Result, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{Seek, SeekFrom, Read, Write, ErrorKind};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
-use emacs::{defun, CallEnv, Env, IntoLisp, Result, Value, FromLisp};
 
 emacs::plugin_is_GPL_compatible!();
 
-use libssh_rs::*;
 use anyhow::bail;
+use libssh_rs::*;
 
 thread_local! {
     static SESSIONS: RefCell<HashMap<String, Rc<Session>>> = RefCell::new(HashMap::new());
@@ -17,7 +17,7 @@ const BLOCKSIZE: usize = 163840;
 
 emacs::use_symbols! {
     nil t
-    car cdr nth
+    car cdr nth cons nreverse
     tramp_dissect_file_name
     read_passwd read_string
     insert replace_buffer_contents
@@ -27,7 +27,9 @@ emacs::use_symbols! {
 }
 
 #[emacs::module(name = "tramp-libssh")]
-fn init(_: &Env) -> Result<()> { Ok(()) }
+fn init(_: &Env) -> Result<()> {
+    Ok(())
+}
 
 struct DissectedFilename {
     full_name: String,
@@ -43,6 +45,8 @@ trait LocalEnv<'a> {
     fn car(&self, list: Value<'a>) -> Result<Value<'a>>;
     fn cdr(&self, list: Value<'a>) -> Result<Value<'a>>;
     fn nth(&self, idx: usize, list: Value<'a>) -> Result<Value<'a>>;
+    fn cons(&self, car_v: Value<'a>, cdr_v: Value<'a>) -> Result<Value<'a>>;
+    fn nreverse(&self, list: Value<'a>) -> Result<Value<'a>>;
     fn tramp_dissect_file_name_el(&self, filename: Value<'a>) -> Result<Value<'a>>;
     fn tramp_dissect_file_name(&self, filename: Value<'a>) -> Result<DissectedFilename>;
     fn read_passwd(&self, prompt: &str, confirm: bool) -> Result<String>;
@@ -50,7 +54,7 @@ trait LocalEnv<'a> {
     fn insert(&self, text: &str) -> Result<()>;
     fn replace_buffer_contents(&self, other_buf: Value<'a>) -> Result<()>;
     fn set_buffer(&self, buffer: Value<'a>) -> Result<()>;
-    fn current_buffer(&self) -> Result<Value<'a>>;    
+    fn current_buffer(&self) -> Result<Value<'a>>;
     fn generate_new_buffer(&self, name: &str) -> Result<Value<'a>>;
     fn kill_buffer(&self, buffer: Value<'a>) -> Result<()>;
     fn buffer_substring_no_properties(&self, start: usize, end: usize) -> Result<String>;
@@ -66,7 +70,7 @@ impl<'a> LocalEnv<'a> for &'a Env {
     fn t(&self) -> Value<'a> {
         t.bind(self)
     }
-    
+
     fn car(&self, list: Value<'a>) -> Result<Value<'a>> {
         self.call(car, &[list])
     }
@@ -74,9 +78,17 @@ impl<'a> LocalEnv<'a> for &'a Env {
     fn cdr(&self, list: Value<'a>) -> Result<Value<'a>> {
         self.call(cdr, &[list])
     }
-    
+
     fn nth(&self, idx: usize, list: Value<'a>) -> Result<Value<'a>> {
         self.call(nth, &[idx.into_lisp(self)?, list])
+    }
+
+    fn cons(&self, car_v: Value<'a>, cdr_v: Value<'a>) -> Result<Value<'a>> {
+        self.call(cons, &[car_v, cdr_v])
+    }
+
+    fn nreverse(&self, list: Value<'a>) -> Result<Value<'a>> {
+        self.call(nreverse, &[list])
     }
 
     fn tramp_dissect_file_name_el(&self, filename: Value<'a>) -> Result<Value<'a>> {
@@ -85,24 +97,18 @@ impl<'a> LocalEnv<'a> for &'a Env {
 
     fn tramp_dissect_file_name(&self, filename: Value<'a>) -> Result<DissectedFilename> {
         let dissected_v = self.tramp_dissect_file_name_el(filename)?;
-        
-        Ok(
-            DissectedFilename {
-                full_name: String::from_lisp(filename)?,
-                protocol: String::from_lisp(self.nth(1, dissected_v)?)?,
-                user: String::from_lisp(self.nth(2, dissected_v)?)?,
-                host: String::from_lisp(self.nth(4, dissected_v)?)?,
-                filename: String::from_lisp(self.nth(6, dissected_v)?)?,
-            }
-        )
+
+        Ok(DissectedFilename {
+            full_name: String::from_lisp(filename)?,
+            protocol: String::from_lisp(self.nth(1, dissected_v)?)?,
+            user: String::from_lisp(self.nth(2, dissected_v)?)?,
+            host: String::from_lisp(self.nth(4, dissected_v)?)?,
+            filename: String::from_lisp(self.nth(6, dissected_v)?)?,
+        })
     }
 
     fn read_passwd(&self, prompt: &str, confirm: bool) -> Result<String> {
-        let confirm = if confirm {
-            t
-        } else {
-            nil
-        };
+        let confirm = if confirm { t } else { nil };
         let passwd_v = self.call(read_passwd, &[prompt.into_lisp(self)?, confirm.bind(self)])?;
         String::from_lisp(passwd_v)
     }
@@ -121,7 +127,7 @@ impl<'a> LocalEnv<'a> for &'a Env {
         self.call(replace_buffer_contents, &[other_buf])?;
         Ok(())
     }
-    
+
     fn set_buffer(&self, buffer: Value<'a>) -> Result<()> {
         self.call(set_buffer, &[buffer])?;
         Ok(())
@@ -141,9 +147,10 @@ impl<'a> LocalEnv<'a> for &'a Env {
     }
 
     fn buffer_substring_no_properties(&self, begin: usize, end: usize) -> Result<String> {
-        String::from_lisp(self.call(buffer_substring_no_properties,
-                                    &[begin.into_lisp(self)?,
-                                      end.into_lisp(self)?])?)
+        String::from_lisp(self.call(
+            buffer_substring_no_properties,
+            &[begin.into_lisp(self)?, end.into_lisp(self)?],
+        )?)
     }
 
     fn buffer_size(&self) -> Result<usize> {
@@ -153,7 +160,6 @@ impl<'a> LocalEnv<'a> for &'a Env {
     fn default_directory(&self) -> Result<DissectedFilename> {
         self.tramp_dissect_file_name(self.intern("default-directory")?)
     }
-
 }
 
 fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
@@ -195,17 +201,19 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
     match session.is_known_server()? {
         KnownHosts::Changed => {
             bail!(format!("Host key for server {} changed", host));
-        },
+        }
         KnownHosts::Other => {
-            bail!(format!("Host key for server {} not found but other type of key exists", host));
-        },
+            bail!(format!(
+                "Host key for server {} not found but other type of key exists",
+                host
+            ));
+        }
         KnownHosts::NotFound => {
             bail!("Known hosts file not found");
-            
-        },
+        }
         KnownHosts::Unknown => {
             bail!(format!("Server {} unknown", host));
-        },
+        }
         KnownHosts::Ok => {}
     }
 
@@ -216,12 +224,23 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
 }
 
 #[defun]
-fn write_region(env: &Env, start: Option<Value>, end: Option<Value>, filename: Value,
-                append: Option<Value>, visit: Option<Value>, lockname: Option<Value>, mustbenew: Option<Value>) -> Result<()> {
+fn write_region(
+    env: &Env,
+    start: Option<Value>,
+    end: Option<Value>,
+    filename: Value,
+    append: Option<Value>,
+    visit: Option<Value>,
+    lockname: Option<Value>,
+    mustbenew: Option<Value>,
+) -> Result<()> {
     let dissected = env.tramp_dissect_file_name(filename)?;
 
     let (str_contents, begin) = if let Some(start) = start {
-        (String::from_lisp(start).ok(), usize::from_lisp(start).unwrap_or(0))
+        (
+            String::from_lisp(start).ok(),
+            usize::from_lisp(start).unwrap_or(0),
+        )
     } else {
         (None, 0)
     };
@@ -246,7 +265,7 @@ fn write_region(env: &Env, start: Option<Value>, end: Option<Value>, filename: V
 
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp_sess = session.sftp()?;
-    let mut open_mode = OpenFlags::READ_ONLY|OpenFlags::CREATE;
+    let mut open_mode = OpenFlags::READ_ONLY | OpenFlags::CREATE;
     if append_file {
         open_mode |= OpenFlags::APPEND;
     } else if begin == 0 {
@@ -259,7 +278,7 @@ fn write_region(env: &Env, start: Option<Value>, end: Option<Value>, filename: V
             rfile.seek(SeekFrom::Start(seek))?;
         }
     }
-    
+
     if let Some(str_contents) = str_contents {
         rfile.write(str_contents.as_bytes())?;
     } else {
@@ -277,7 +296,7 @@ fn write_region(env: &Env, start: Option<Value>, end: Option<Value>, filename: V
             cur_byte += written;
 
             if cur_byte == end {
-                break
+                break;
             } else if cur_byte > end {
                 bail!("Wrote too much?");
             }
@@ -288,7 +307,14 @@ fn write_region(env: &Env, start: Option<Value>, end: Option<Value>, filename: V
 }
 
 #[defun]
-fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin: Option<usize>, end: Option<usize>, replace: Option<Value>) -> Result<()> {
+fn insert_file_contents1(
+    env: &Env,
+    filename: Value,
+    visit: Option<Value>,
+    begin: Option<usize>,
+    end: Option<usize>,
+    replace: Option<Value>,
+) -> Result<()> {
     let dissected = env.tramp_dissect_file_name(filename)?;
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
 
@@ -306,7 +332,7 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
     } else {
         (env.nil(), env.nil())
     };
-    
+
     let mut total_bytes: usize = 0;
     let mut buf = [0; BLOCKSIZE];
     loop {
@@ -317,20 +343,20 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
 
             let remaining: usize = end - total_bytes;
             if remaining < BLOCKSIZE {
-                &mut buf[0 .. remaining]
+                &mut buf[0..remaining]
             } else {
                 &mut buf[..]
             }
         } else {
             &mut buf[..]
         };
-        
+
         let bytes = rfile.read(bufslice)?;
         if bytes == 0 {
             break;
         }
-        
-        env.insert(&std::str::from_utf8(&buf[0 .. bytes])?)?;
+
+        env.insert(&std::str::from_utf8(&buf[0..bytes])?)?;
 
         total_bytes += bytes;
     }
@@ -340,12 +366,12 @@ fn insert_file_contents1(env: &Env, filename: Value, visit: Option<Value>, begin
         env.replace_buffer_contents(tmp_buf)?;
         env.kill_buffer(tmp_buf)?;
     }
-        
+
     Ok(())
 }
 
 #[defun]
-fn file_exists_p<'a>(env: &'a Env, filename: Value<'a>)  -> Result<Value<'a>> {
+fn file_exists_p<'a>(env: &'a Env, filename: Value<'a>) -> Result<Value<'a>> {
     let dissected = env.tramp_dissect_file_name(filename)?;
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp = session.sftp()?;
@@ -356,11 +382,38 @@ fn file_exists_p<'a>(env: &'a Env, filename: Value<'a>)  -> Result<Value<'a>> {
             let e: std::io::Error = e.into();
             match e.kind() {
                 std::io::ErrorKind::NotFound => Ok(nil.bind(env)),
-                _ => Err(e.into())
+                _ => Err(e.into()),
             }
-        },
-        Err(e) => Err(e.into())
+        }
+        Err(e) => Err(e.into()),
     }
+}
+
+#[defun]
+fn directory_files<'a>(
+    env: &'a Env,
+    directory: Value<'a>,
+    full_name: Option<Value<'a>>,
+    match_regexp: Option<String>,
+    nosort: Option<Value<'a>>,
+    count: Option<usize>,
+) -> Result<Value<'a>> {
+    let dissected = env.tramp_dissect_file_name(directory)?;
+    let session = get_connection(&dissected.user, &dissected.host, &env)?;
+    let sftp = session.sftp()?;
+    let dir = sftp.open_dir(&dissected.filename)?;
+    let mut dirlist: Value<'a> = nil.bind(env);
+
+    loop {
+        match dir.read_dir() {
+            Some(attributes) => {
+                dirlist = env.cons(attributes?.name().unwrap().into_lisp(env)?, dirlist)?
+            }
+            None => break,
+        }
+    }
+
+    env.nreverse(dirlist)
 }
 
 #[cfg(test)]
@@ -368,8 +421,5 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-    }
+    fn it_works() {}
 }
-
-

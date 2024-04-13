@@ -71,5 +71,12 @@
   (message (prin1-to-string (tramp-libssh-file-exists-p "/ssh:joe@sadusk.com:/home/joe/blarh.txt")))
   )
 
+(defun test-directory-files ()
+  (interactive)
+  (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+  (message (prin1-to-string (tramp-libssh-directory-files "/ssh:joe@sadusk.com:/home/joe/" nil nil nil nil)))
+  )
+
+
 ;(message (read-string "hello: " nil nil nil nil))\
 ;(message (read-passwd "asdf: " 't))
