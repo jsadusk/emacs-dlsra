@@ -24,6 +24,7 @@ emacs::use_symbols! {
     set_buffer current_buffer generate_new_buffer kill_buffer
     buffer_substring_no_properties
     buffer_size
+    string_match_p
 }
 
 #[emacs::module(name = "tramp-libssh")]
@@ -60,6 +61,7 @@ trait LocalEnv<'a> {
     fn buffer_substring_no_properties(&self, start: usize, end: usize) -> Result<String>;
     fn buffer_size(&self) -> Result<usize>;
     fn default_directory(&self) -> Result<DissectedFilename>;
+    fn string_match_p(&self, regexp: Value<'a>, match_string: &str) -> Result<bool>;
 }
 
 impl<'a> LocalEnv<'a> for &'a Env {
@@ -159,6 +161,11 @@ impl<'a> LocalEnv<'a> for &'a Env {
 
     fn default_directory(&self) -> Result<DissectedFilename> {
         self.tramp_dissect_file_name(self.intern("default-directory")?)
+    }
+
+    fn string_match_p(&self, regexp: Value<'a>, match_string: &str) -> Result<bool> {
+        let result = self.call(string_match_p, &[regexp, match_string.into_lisp(self)?])?;
+        Ok(result.is_not_nil())
     }
 }
 
@@ -394,7 +401,7 @@ fn directory_files<'a>(
     env: &'a Env,
     directory: Value<'a>,
     full_name: Option<Value<'a>>,
-    match_regexp: Option<String>,
+    match_regexp: Option<Value<'a>>,
     nosort: Option<Value<'a>>,
     count: Option<usize>,
 ) -> Result<Value<'a>> {
@@ -404,16 +411,46 @@ fn directory_files<'a>(
     let dir = sftp.open_dir(&dissected.filename)?;
     let mut dirlist: Value<'a> = nil.bind(env);
 
+    let full_dir = if dissected.filename.ends_with("/") {
+        dissected.filename
+    } else {
+        dissected.filename.clone() + "/"
+    };
+
+    let mut counter = 0;
     loop {
-        match dir.read_dir() {
+        if let Some(count) = count {
+            if counter >= count {
+                break;
+            }
+            counter += 1;
+        }
+
+        match dir.read_dir().transpose()? {
             Some(attributes) => {
-                dirlist = env.cons(attributes?.name().unwrap().into_lisp(env)?, dirlist)?
+                let short_name = attributes.name().unwrap();
+
+                if let Some(match_regexp) = match_regexp {
+                    if !env.string_match_p(match_regexp, short_name)? {
+                        continue;
+                    }
+                };
+
+                let name = match full_name {
+                    Some(_) => full_dir.clone() + short_name,
+                    None => short_name.to_string(),
+                };
+                dirlist = env.cons(name.into_lisp(env)?, dirlist)?
             }
             None => break,
         }
     }
 
-    env.nreverse(dirlist)
+    if nosort.is_some() {
+        Ok(dirlist)
+    } else {
+        env.nreverse(dirlist)
+    }
 }
 
 #[cfg(test)]

@@ -77,6 +77,23 @@
   (message (prin1-to-string (tramp-libssh-directory-files "/ssh:joe@sadusk.com:/home/joe/" nil nil nil nil)))
   )
 
+(defun test-directory-files-fulldir ()
+  (interactive)
+  (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+  (message (prin1-to-string (tramp-libssh-directory-files "/ssh:joe@sadusk.com:/home/joe/" t nil nil nil)))
+  )
+
+(defun test-directory-files-rexexp ()
+  (interactive)
+  (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+  (message (prin1-to-string (tramp-libssh-directory-files "/ssh:joe@sadusk.com:/home/joe/" nil "^s.*t" nil nil)))
+  )
+
+(defun test-directory-files-count ()
+  (interactive)
+  (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+  (message (prin1-to-string (tramp-libssh-directory-files "/ssh:joe@sadusk.com:/home/joe/" nil nil nil 5)))
+  )
 
 ;(message (read-string "hello: " nil nil nil nil))\
 ;(message (read-passwd "asdf: " 't))
