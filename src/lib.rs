@@ -6,11 +6,54 @@ use std::rc::Rc;
 
 emacs::plugin_is_GPL_compatible!();
 
-use anyhow::bail;
+use anyhow::{anyhow, bail};
+use libssh_rs::Error as SshError;
 use libssh_rs::*;
+
+struct ScopedStatic<Inner> {
+    inner: RefCell<Option<*const Inner>>,
+}
+
+impl<Inner> Default for ScopedStatic<Inner> {
+    fn default() -> Self {
+        Self {
+            inner: RefCell::new(None),
+        }
+    }
+}
+
+impl<Inner> ScopedStatic<Inner> {
+    pub fn scope<'a, Ret>(&self, scoped: &'a Inner, f: impl FnOnce() -> Ret) -> Ret {
+        {
+            let scoped_ptr: *const Inner = scoped;
+            let mut inner = self.inner.borrow_mut();
+            *inner = Some(scoped_ptr);
+        }
+
+        let ret = f();
+
+        {
+            let mut inner = self.inner.borrow_mut();
+            *inner = None
+        }
+
+        ret
+    }
+
+    pub fn borrow<'a>(&self) -> Result<&'a Inner> {
+        unsafe {
+            self.inner
+                .borrow()
+                .ok_or(anyhow!("Not scoped"))?
+                .as_ref()
+                .ok_or(anyhow!("inner invalid"))
+        }
+    }
+}
 
 thread_local! {
     static SESSIONS: RefCell<HashMap<String, Rc<Session>>> = RefCell::new(HashMap::new());
+    static CURRENT_ENV: RefCell<ScopedStatic<Env>> = RefCell::new(ScopedStatic::default());
 }
 
 const BLOCKSIZE: usize = 163840;
@@ -169,6 +212,23 @@ impl<'a> LocalEnv<'a> for &'a Env {
     }
 }
 
+fn ssh_auth_callback(
+    prompt: &str,
+    echo: bool,
+    verify: bool,
+    identity: Option<String>,
+) -> SshResult<String> {
+    CURRENT_ENV.with(|current_env| {
+        let env = current_env
+            .borrow()
+            .borrow()
+            .map_err(|e| SshError::Fatal(e.to_string()))?;
+        env.message("callback")
+            .map_err(|e| SshError::Fatal(e.to_string()))?;
+        Ok("password".to_string())
+    })
+}
+
 fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
     let connection_str = format!("{}@{}", user, host);
     SESSIONS.with(|sessions| {
@@ -202,32 +262,38 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
     session.set_option(SshOption::User(Some(user.to_string())))?;
     session.set_option(SshOption::Hostname(host.to_string()))?;
     session.options_parse_config(None)?;
-    session.connect()?;
-    let srv_pubkey = session.get_server_public_key()?;
-    let hash = srv_pubkey.get_public_key_hash(PublicKeyHashType::Sha1)?;
-    match session.is_known_server()? {
-        KnownHosts::Changed => {
-            bail!(format!("Host key for server {} changed", host));
-        }
-        KnownHosts::Other => {
-            bail!(format!(
-                "Host key for server {} not found but other type of key exists",
-                host
-            ));
-        }
-        KnownHosts::NotFound => {
-            bail!("Known hosts file not found");
-        }
-        KnownHosts::Unknown => {
-            bail!(format!("Server {} unknown", host));
-        }
-        KnownHosts::Ok => {}
-    }
+    session.set_auth_callback(ssh_auth_callback);
 
-    session.userauth_public_key_auto(None, None)?;
-    env.message("Connected session")?;
+    CURRENT_ENV.with(|current_env| {
+        current_env.borrow().scope(env, || {
+            session.connect()?;
+            let srv_pubkey = session.get_server_public_key()?;
+            let hash = srv_pubkey.get_public_key_hash(PublicKeyHashType::Sha1)?;
+            match session.is_known_server()? {
+                KnownHosts::Changed => {
+                    bail!(format!("Host key for server {} changed", host));
+                }
+                KnownHosts::Other => {
+                    bail!(format!(
+                        "Host key for server {} not found but other type of key exists",
+                        host
+                    ));
+                }
+                KnownHosts::NotFound => {
+                    bail!("Known hosts file not found");
+                }
+                KnownHosts::Unknown => {
+                    bail!(format!("Server {} unknown", host));
+                }
+                KnownHosts::Ok => {}
+            }
 
-    Ok(session)
+            session.userauth_public_key_auto(None, None)?;
+            env.message("Connected session")?;
+
+            Ok(session)
+        })
+    })
 }
 
 #[defun]
