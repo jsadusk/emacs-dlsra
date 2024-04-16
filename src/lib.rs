@@ -62,7 +62,7 @@ emacs::use_symbols! {
     nil t
     car cdr nth cons nreverse
     tramp_dissect_file_name
-    read_passwd read_string
+    read_passwd read_string y_or_n_p
     insert replace_buffer_contents
     set_buffer current_buffer generate_new_buffer kill_buffer
     buffer_substring_no_properties
@@ -95,6 +95,7 @@ trait LocalEnv<'a> {
     fn tramp_dissect_file_name(&self, filename: Value<'a>) -> Result<DissectedFilename>;
     fn read_passwd(&self, prompt: &str, confirm: bool) -> Result<String>;
     fn read_string(&self, prompt: &str) -> Result<String>;
+    fn y_or_n_p(&self, prompt: &str) -> Result<bool>;
     fn insert(&self, text: &str) -> Result<()>;
     fn replace_buffer_contents(&self, other_buf: Value<'a>) -> Result<()>;
     fn set_buffer(&self, buffer: Value<'a>) -> Result<()>;
@@ -161,6 +162,11 @@ impl<'a> LocalEnv<'a> for &'a Env {
     fn read_string(&self, prompt: &str) -> Result<String> {
         let result_v = self.call(read_string, &[prompt.into_lisp(self)?])?;
         String::from_lisp(result_v)
+    }
+
+    fn y_or_n_p(&self, prompt: &str) -> Result<bool> {
+        let result_v = self.call(y_or_n_p, &[prompt.into_lisp(self)?])?;
+        Ok(result_v.is_not_nil())
     }
 
     fn insert(&self, text: &str) -> Result<()> {
@@ -264,13 +270,6 @@ fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
 
 fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
     let session = Session::new()?;
-    /*unsafe {
-        //let env: *const LocalEnv = env as *const LocalEnv;
-        session.set_auth_callback(
-            |prompt, echo, verify, identity|
-            env.borrow().read_passwd(prompt, verify).map_err(|e| libssh_rs::Error::Fatal(e.to_string()))
-        );
-    }*/
     session.set_option(SshOption::User(Some(user.to_string())))?;
     session.set_option(SshOption::Hostname(host.to_string()))?;
     session.options_parse_config(None)?;
@@ -283,7 +282,10 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
             let hash = srv_pubkey.get_public_key_hash(PublicKeyHashType::Sha1)?;
             match session.is_known_server()? {
                 KnownHosts::Changed => {
-                    bail!(format!("Host key for server {} changed", host));
+                    bail!(format!(
+                        "Host key for server {} changed, remove from known hosts to update",
+                        host
+                    ));
                 }
                 KnownHosts::Other => {
                     bail!(format!(
@@ -291,11 +293,14 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
                         host
                     ));
                 }
-                KnownHosts::NotFound => {
-                    bail!("Known hosts file not found");
-                }
-                KnownHosts::Unknown => {
-                    bail!(format!("Server {} unknown", host));
+                KnownHosts::NotFound | KnownHosts::Unknown => {
+                    let trust =
+                        env.y_or_n_p(&format!("SSH host {} not known. Trust host key?: ", host))?;
+                    if trust {
+                        session.update_known_hosts_file()?;
+                    } else {
+                        bail!(format!("Host {} not trusted", host));
+                    }
                 }
                 KnownHosts::Ok => {}
             }
