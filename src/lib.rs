@@ -218,14 +218,28 @@ fn ssh_auth_callback(
     verify: bool,
     identity: Option<String>,
 ) -> SshResult<String> {
-    CURRENT_ENV.with(|current_env| {
-        let env = current_env
-            .borrow()
-            .map_err(|e| SshError::Fatal(e.to_string()))?;
-        env.message("callback")
-            .map_err(|e| SshError::Fatal(e.to_string()))?;
-        Ok("password".to_string())
-    })
+    CURRENT_ENV
+        .with(|current_env| {
+            let prompt = match identity {
+                Some(ident) => format!("{} ({}): ", prompt, ident),
+                None => prompt.to_string(),
+            };
+
+            let env = current_env.borrow()?;
+            if echo {
+                let password = env.read_string(&prompt)?;
+                if verify {
+                    let password2 = env.read_string(&prompt)?;
+                    if password != password2 {
+                        bail!("Passwords don't match")
+                    }
+                }
+                Ok(password)
+            } else {
+                env.read_passwd(&prompt, verify)
+            }
+        })
+        .map_err(|e: anyhow::Error| SshError::Fatal(e.to_string()))
 }
 
 fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
@@ -234,7 +248,6 @@ fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
         let mut sessions = sessions.try_borrow_mut()?;
         if let Some(session) = sessions.get(&connection_str) {
             if session.is_connected() {
-                env.message("Cached session")?;
                 Ok(session.clone())
             } else {
                 let session = Rc::new(init_connection(user, host, env)?);
