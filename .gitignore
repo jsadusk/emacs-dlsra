@@ -1,5 +1,6 @@
 # Compiled
 *.elc
+rs-module.dylib
 
 # Packaging
 .cask
