@@ -300,7 +300,9 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
                 KnownHosts::Ok => {}
             }
 
-            session.userauth_public_key_auto(None, None)?;
+            //session.userauth_public_key_auto(None, None)?;
+            let password = env.read_passwd(&format!("Password ({}@{}): ", user, host), false)?;
+            session.userauth_password(Some(&user), Some(&password))?;
             env.message("Connected session")?;
 
             Ok(session)
