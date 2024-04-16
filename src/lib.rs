@@ -53,7 +53,7 @@ impl<Inner> ScopedStatic<Inner> {
 
 thread_local! {
     static SESSIONS: RefCell<HashMap<String, Rc<Session>>> = RefCell::new(HashMap::new());
-    static CURRENT_ENV: RefCell<ScopedStatic<Env>> = RefCell::new(ScopedStatic::default());
+    static CURRENT_ENV: ScopedStatic<Env> = ScopedStatic::default();
 }
 
 const BLOCKSIZE: usize = 163840;
@@ -221,7 +221,6 @@ fn ssh_auth_callback(
     CURRENT_ENV.with(|current_env| {
         let env = current_env
             .borrow()
-            .borrow()
             .map_err(|e| SshError::Fatal(e.to_string()))?;
         env.message("callback")
             .map_err(|e| SshError::Fatal(e.to_string()))?;
@@ -265,7 +264,7 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
     session.set_auth_callback(ssh_auth_callback);
 
     CURRENT_ENV.with(|current_env| {
-        current_env.borrow().scope(env, || {
+        current_env.scope(env, || {
             session.connect()?;
             let srv_pubkey = session.get_server_public_key()?;
             let hash = srv_pubkey.get_public_key_hash(PublicKeyHashType::Sha1)?;
