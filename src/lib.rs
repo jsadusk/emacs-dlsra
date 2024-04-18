@@ -357,7 +357,7 @@ fn write_region(
 
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp_sess = session.sftp()?;
-    let mut open_mode = OpenFlags::READ_ONLY | OpenFlags::CREATE;
+    let mut open_mode = OpenFlags::WRITE_ONLY | OpenFlags::CREATE;
     if append_file {
         open_mode |= OpenFlags::APPEND;
     } else if begin == 0 {
@@ -536,6 +536,15 @@ fn directory_files<'a>(
     } else {
         env.nreverse(dirlist)
     }
+}
+
+#[defun]
+fn delete_file(env: &Env, filename: Value, trash: Value) -> Result<()> {
+    let dissected = env.tramp_dissect_file_name(filename)?;
+    let session = get_connection(&dissected.user, &dissected.host, &env)?;
+    let sftp = session.sftp()?;
+    sftp.remove_file(&dissected.filename)?;
+    Ok(())
 }
 
 #[cfg(test)]

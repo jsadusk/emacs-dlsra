@@ -95,5 +95,11 @@
   (message (prin1-to-string (tramp-libssh-directory-files "/ssh:joe@sadusk.com:/home/joe/" nil nil nil 5)))
   )
 
+(defun test-delete-file ()
+  (interactive)
+  (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+  (tramp-libssh-delete-file "/ssh:joe@sadusk.com:/home/joe/buffer.txt" nil)
+  )
+
 ;(message (read-string "hello: " nil nil nil nil))\
 ;(message (read-passwd "asdf: " 't))
