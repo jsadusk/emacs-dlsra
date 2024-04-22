@@ -1,6 +1,8 @@
 use emacs::{defun, Env, FromLisp, IntoLisp, Result, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::metadata;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 
@@ -547,10 +549,74 @@ fn delete_file(env: &Env, filename: Value, trash: Value) -> Result<()> {
     Ok(())
 }
 
+#[defun]
+fn file_attributes<'a>(
+    env: &'a Env,
+    filename: Value<'a>,
+    id_format: Value<'a>,
+) -> Result<Value<'a>> {
+    let dissected = env.tramp_dissect_file_name(filename)?;
+    let session = get_connection(&dissected.user, &dissected.host, &env)?;
+    let sftp = session.sftp()?;
+    let metadata = sftp.metadata(&dissected.filename)?;
+    let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
+    let mut hasher = DefaultHasher::new();
+    dissected.user.hash(&mut hasher);
+    dissected.host.hash(&mut hasher);
+    let host_id = hasher.finish().into_lisp(env)?;
+    let vfs_id = fs_metadata.filesystem_id().into_lisp(env)?;
+    let fs_id = env.cons(host_id, vfs_id)?;
+
+    hasher = DefaultHasher::new();
+    dissected.filename.hash(&mut hasher);
+    let file_num = hasher.finish().into_lisp(env)?;
+
+    let permissions = octal_permissions_to_string(
+        metadata
+            .permissions()
+            .ok_or(anyhow!("Missing permissions"))?,
+    )
+    .into_lisp(env)?;
+
+    let size = metadata.len().ok_or(anyhow!("Missing size"))?;
+
+    Ok(nil.bind(env))
+}
+
+fn octal_permissions_to_string(permissions: u32) -> String {
+    let mut permissions: u32 = permissions;
+    let mut ls: Vec<char> = "----------".chars().collect();
+
+    let rmask = 4;
+    let wmask = 2;
+    let xmask = 1;
+
+    let end = 9;
+    for i in 0..3 {
+        let set = end - i * 3;
+        if permissions & xmask != 0 {
+            ls[set] = 'x';
+        }
+        if permissions & wmask != 0 {
+            ls[set - 1] = 'w';
+        }
+        if permissions & rmask != 0 {
+            ls[set - 2] = 'r';
+        }
+
+        permissions = permissions >> 3;
+    }
+
+    ls.iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {}
+    fn test_octal_permissions_to_string() {
+        assert_eq!(octal_permissions_to_string(0o755), "-rwxr-xr-x");
+        assert_eq!(octal_permissions_to_string(0o644), "-rw-r--r--");
+    }
 }
