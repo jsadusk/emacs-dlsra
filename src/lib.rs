@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs::metadata;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -593,7 +594,26 @@ fn file_attributes<'a>(
     let dissected = env.tramp_dissect_file_name(filename)?;
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp = session.sftp()?;
-    let metadata = sftp.metadata(&dissected.filename)?;
+
+    // For some reason you get more metadata from reading the directory than
+    // you do just getting file attributes directly
+    let metadata = {
+        let path = Path::new(&dissected.filename);
+        let dir = sftp.open_dir(path.parent().unwrap().to_str().unwrap())?;
+        loop {
+            match dir.read_dir().transpose()? {
+                Some(metadata) => match metadata.name() {
+                    Some(filename) => {
+                        if filename == path.file_name().unwrap() {
+                            break metadata;
+                        }
+                    }
+                    _ => continue,
+                },
+                None => bail!("File {} not found", dissected.filename),
+            }
+        }
+    };
     let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
     let mut hasher = DefaultHasher::new();
     dissected.user.hash(&mut hasher);
@@ -623,10 +643,12 @@ fn file_attributes<'a>(
         .ok_or(anyhow!("Mising mtime"))?
         .into_lisp(env)?;
     let ctime = mtime;
-    let atime = metadata
-        .accessed()
-        .ok_or(anyhow!("Missing atime"))?
-        .into_lisp(env)?;
+    let atime = metadata.accessed().ok_or(anyhow!("Missing atime"))?;
+    let atime = if atime == SystemTime::UNIX_EPOCH {
+        mtime
+    } else {
+        atime.into_lisp(env)?
+    };
 
     let (user, group) =
         if id_format.is_not_nil() && id_format.eq(string.bind(env)) {
