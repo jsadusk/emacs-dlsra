@@ -38,6 +38,13 @@
 ;;   )
 
 (add-to-list 'load-path "~/work/tramp-libssh")
+
+(setq testhost "jsadusk@dev")
+(setq testdir "/home/jsadusk/")
+(setq testpath (concat "/ssh:" testhost ":" testdir))
+(setq testfilename "missing.yaml")
+(setq testfilepath (concat testpath testfilename))
+(message testfilepath)
 (require 'rs-module)
 (defun test-libssh-insert-from-file ()
   (interactive)
@@ -55,19 +62,19 @@
 (defun test-libssh-write-buffer ()
   (interactive)
   (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
-  (tramp-libssh-write-region nil nil "/ssh:joe@sadusk.com:/home/joe/buffer.txt" nil nil nil nil)
+  (tramp-libssh-write-region nil nil testfilepath nil nil nil nil)
   )
 
 (defun test-libssh-write-buffer-append ()
   (interactive)
   (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
-  (tramp-libssh-write-region nil nil "/ssh:joe@sadusk.com:/home/joe/buffer.txt" t nil nil nil)
+  (tramp-libssh-write-region nil nil testfilepath t nil nil nil)
   )
 
 (defun test-libssh-file-exists ()
   (interactive)
   (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
-  (message (prin1-to-string (tramp-libssh-file-exists-p "/ssh:joe@sadusk.com:/home/joe/buffer.txt")))
+  (message (prin1-to-string (tramp-libssh-file-exists-p testfilepath)))
   (message (prin1-to-string (tramp-libssh-file-exists-p "/ssh:joe@sadusk.com:/home/joe/blarh.txt")))
   )
 
@@ -98,7 +105,13 @@
 (defun test-delete-file ()
   (interactive)
   (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
-  (tramp-libssh-delete-file "/ssh:joe@sadusk.com:/home/joe/buffer.txt" nil)
+  (tramp-libssh-delete-file testfilepath nil)
+  )
+
+(defun test-file-attributes()
+  (interactive)
+  (rs-module/load "work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+  (message (prin1-to-string (tramp-libssh-file-attributes testfilepath 'string)))
   )
 
 ;(message (read-string "hello: " nil nil nil nil))\

@@ -1,10 +1,12 @@
 use emacs::{defun, Env, FromLisp, IntoLisp, Result, Value};
+use libssh_rs::sys::sftp_readlink;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::metadata;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
+use std::time::SystemTime;
 
 emacs::plugin_is_GPL_compatible!();
 
@@ -70,6 +72,7 @@ emacs::use_symbols! {
     buffer_substring_no_properties
     buffer_size
     string_match_p
+    string integer
 }
 
 #[emacs::module(name = "tramp-libssh")]
@@ -220,6 +223,38 @@ impl<'a> LocalEnv<'a> for &'a Env {
     }
 }
 
+// Get around foreign type rule
+trait MyIntoLisp<'e> {
+    fn into_lisp(self, env: &'e Env) -> Result<Value<'e>>;
+}
+
+impl<'e> MyIntoLisp<'e> for SystemTime {
+    fn into_lisp(self, env: &'e Env) -> Result<Value<'e>> {
+        let dur = self.duration_since(SystemTime::UNIX_EPOCH)?;
+        let s = dur.as_secs();
+        let ns = dur.subsec_nanos();
+
+        // ported from timefns.c make_lisp_time()
+        let lo_time_bits = 16;
+        let hi_time = (s >> lo_time_bits).into_lisp(env)?;
+        let lo_time = (s & ((1 << lo_time_bits) - 1)).into_lisp(env)?;
+        let micro = (ns / 1000).into_lisp(env)?;
+        let pico = (ns % 1000 * 1000).into_lisp(env)?;
+
+        pico.cons(micro)?.cons(lo_time)?.cons(hi_time)
+    }
+}
+
+trait ValueExt<'e> {
+    fn cons(self, cdr_v: impl IntoLisp<'e>) -> Result<Value<'e>>;
+}
+
+impl<'e> ValueExt<'e> for Value<'e> {
+    fn cons(self, cdr_v: impl IntoLisp<'e>) -> Result<Value<'e>> {
+        self.env.cons(cdr_v.into_lisp(self.env)?, self)
+    }
+}
+
 fn ssh_auth_callback(
     prompt: &str,
     echo: bool,
@@ -307,9 +342,9 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
                 KnownHosts::Ok => {}
             }
 
-            //session.userauth_public_key_auto(None, None)?;
-            let password = env.read_passwd(&format!("Password ({}@{}): ", user, host), false)?;
-            session.userauth_password(Some(&user), Some(&password))?;
+            session.userauth_public_key_auto(None, None)?;
+            //let password = env.read_passwd(&format!("Password ({}@{}): ", user, host), false)?;
+            //session.userauth_password(Some(&user), Some(&password))?;
             env.message("Connected session")?;
 
             Ok(session)
@@ -563,13 +598,15 @@ fn file_attributes<'a>(
     let mut hasher = DefaultHasher::new();
     dissected.user.hash(&mut hasher);
     dissected.host.hash(&mut hasher);
-    let host_id = hasher.finish().into_lisp(env)?;
-    let vfs_id = fs_metadata.filesystem_id().into_lisp(env)?;
+    let host_id = (hasher.finish() % i64::MAX as u64) as i64;
+    let host_id = host_id.into_lisp(env)?;
+    let vfs_id = ((fs_metadata.filesystem_id() % i64::MAX as u64) as i64).into_lisp(env)?;
     let fs_id = env.cons(host_id, vfs_id)?;
 
     hasher = DefaultHasher::new();
     dissected.filename.hash(&mut hasher);
-    let file_num = hasher.finish().into_lisp(env)?;
+    let file_num = (hasher.finish() % i64::MAX as u64) as i64;
+    let file_num = file_num.into_lisp(env)?;
 
     let permissions = octal_permissions_to_string(
         metadata
@@ -580,7 +617,68 @@ fn file_attributes<'a>(
 
     let size = metadata.len().ok_or(anyhow!("Missing size"))?;
 
-    Ok(nil.bind(env))
+    // ctime isn't supported by the sftp protocol, fake it with mtime?
+    let mtime = metadata
+        .modified()
+        .ok_or(anyhow!("Mising mtime"))?
+        .into_lisp(env)?;
+    let ctime = mtime;
+    let atime = metadata
+        .accessed()
+        .ok_or(anyhow!("Missing atime"))?
+        .into_lisp(env)?;
+
+    let (user, group) =
+        if id_format.is_not_nil() && id_format.eq(string.bind(env)) {
+            (
+                // id format is string, try to get the username,
+                // otherwise stringify the uid/gid
+                match metadata.owner() {
+                    Some(owner) => owner.into_lisp(env)?,
+                    None => format!("{}", metadata.uid().ok_or(anyhow!("Missing UID"))?)
+                        .into_lisp(env)?,
+                },
+                match metadata.group() {
+                    Some(group) => group.into_lisp(env)?,
+                    None => format!("{}", metadata.gid().ok_or(anyhow!("Missing GID"))?)
+                        .into_lisp(env)?,
+                },
+            )
+        } else if id_format.eq(integer.bind(env)) {
+            (
+                metadata
+                    .uid()
+                    .ok_or(anyhow!("MIssing UID"))?
+                    .into_lisp(env)?,
+                metadata
+                    .gid()
+                    .ok_or(anyhow!("Missing GID"))?
+                    .into_lisp(env)?,
+            )
+        } else {
+            bail!("Invalid id format");
+        };
+
+    let filetype = match metadata.file_type().ok_or(anyhow!("Missing file type"))? {
+        FileType::Directory => t.bind(env),
+        FileType::Symlink => sftp.read_link(&dissected.filename)?.into_lisp(env)?,
+        _ => nil.bind(env),
+    };
+
+    env.message("in file_attributes6")?;
+    nil.bind(env)
+        .cons(fs_id)?
+        .cons(file_num)?
+        .cons(nil)?
+        .cons(permissions)?
+        .cons(size)?
+        .cons(ctime)?
+        .cons(mtime)?
+        .cons(atime)?
+        .cons(group)?
+        .cons(user)?
+        .cons(1)?
+        .cons(filetype)
 }
 
 fn octal_permissions_to_string(permissions: u32) -> String {

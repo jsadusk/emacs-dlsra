@@ -17,3 +17,7 @@ thread_local = "1.1.7"
 
 [dev-dependencies]
 emacs-rs-module = {version = "0.18.0"}
+
+#[patch."https://github.com/jsadusk/libssh-rs"]
+#libssh-rs = { path = "../libssh-rs/libssh-rs" }
+
