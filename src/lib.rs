@@ -687,7 +687,6 @@ fn file_attributes<'a>(
         _ => nil.bind(env),
     };
 
-    env.message("in file_attributes6")?;
     nil.bind(env)
         .cons(fs_id)?
         .cons(file_num)?
