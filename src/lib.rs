@@ -585,36 +585,14 @@ fn delete_file(env: &Env, filename: Value, trash: Value) -> Result<()> {
     Ok(())
 }
 
-#[defun]
-fn file_attributes<'a>(
+fn metadata_to_file_attributes<'a>(
     env: &'a Env,
-    filename: Value<'a>,
-    id_format: Value<'a>,
+    sftp: &Sftp,
+    id_format: &Value<'a>,
+    dissected: &DissectedFilename,
+    metadata: &Metadata,
+    fs_metadata: &VfsMetadata,
 ) -> Result<Value<'a>> {
-    let dissected = env.tramp_dissect_file_name(filename)?;
-    let session = get_connection(&dissected.user, &dissected.host, &env)?;
-    let sftp = session.sftp()?;
-
-    // For some reason you get more metadata from reading the directory than
-    // you do just getting file attributes directly
-    let metadata = {
-        let path = Path::new(&dissected.filename);
-        let dir = sftp.open_dir(path.parent().unwrap().to_str().unwrap())?;
-        loop {
-            match dir.read_dir().transpose()? {
-                Some(metadata) => match metadata.name() {
-                    Some(filename) => {
-                        if filename == path.file_name().unwrap() {
-                            break metadata;
-                        }
-                    }
-                    _ => continue,
-                },
-                None => bail!("File {} not found", dissected.filename),
-            }
-        }
-    };
-    let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
     let mut hasher = DefaultHasher::new();
     dissected.user.hash(&mut hasher);
     dissected.host.hash(&mut hasher);
@@ -700,6 +678,40 @@ fn file_attributes<'a>(
         .cons(user)?
         .cons(1)?
         .cons(filetype)
+}
+
+#[defun]
+fn file_attributes<'a>(
+    env: &'a Env,
+    filename: Value<'a>,
+    id_format: Value<'a>,
+) -> Result<Value<'a>> {
+    let dissected = env.tramp_dissect_file_name(filename)?;
+    let session = get_connection(&dissected.user, &dissected.host, &env)?;
+    let sftp = session.sftp()?;
+
+    // For some reason you get more metadata from reading the directory than
+    // you do just getting file attributes directly
+    let metadata = {
+        let path = Path::new(&dissected.filename);
+        let dir = sftp.open_dir(path.parent().unwrap().to_str().unwrap())?;
+        loop {
+            match dir.read_dir().transpose()? {
+                Some(metadata) => match metadata.name() {
+                    Some(filename) => {
+                        if filename == path.file_name().unwrap() {
+                            break metadata;
+                        }
+                    }
+                    _ => continue,
+                },
+                None => bail!("File {} not found", dissected.filename),
+            }
+        }
+    };
+    let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
+
+    metadata_to_file_attributes(env, &sftp, &id_format, &dissected, &metadata, &fs_metadata)
 }
 
 fn octal_permissions_to_string(permissions: u32) -> String {
