@@ -1,18 +1,22 @@
-use emacs::{defun, Env, FromLisp, IntoLisp, Result, Value};
+use emacs::Error as EmacsError;
+use emacs::Result as EmacsResult;
+use emacs::{defun, Env, FromLisp, IntoLisp, Value};
 use libssh_rs::sys::sftp_readlink;
+use libssh_rs::Error as SshError;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fs::metadata;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::SystemTime;
+use thiserror::Error;
 
 emacs::plugin_is_GPL_compatible!();
 
 use anyhow::{anyhow, bail, Context};
-use libssh_rs::Error as SshError;
 use libssh_rs::*;
 
 struct ScopedStatic<Inner> {
@@ -45,7 +49,7 @@ impl<Inner> ScopedStatic<Inner> {
         ret
     }
 
-    pub fn borrow<'a>(&self) -> Result<&'a Inner> {
+    pub fn borrow<'a>(&self) -> EmacsResult<&'a Inner> {
         unsafe {
             self.inner
                 .borrow()
@@ -58,10 +62,12 @@ impl<Inner> ScopedStatic<Inner> {
 
 thread_local! {
     static SESSIONS: RefCell<HashMap<String, Rc<Session>>> = RefCell::new(HashMap::new());
+    static SFTPS: RefCell<HashMap<String, Rc<Sftp>>> = RefCell::new(HashMap::new());
     static CURRENT_ENV: ScopedStatic<Env> = ScopedStatic::default();
 }
 
 const BLOCKSIZE: usize = 163840;
+const RETRIES: usize = 5;
 
 emacs::use_symbols! {
     nil t
@@ -77,7 +83,7 @@ emacs::use_symbols! {
 }
 
 #[emacs::module(name = "tramp-libssh")]
-fn init(_: &Env) -> Result<()> {
+fn init(_: &Env) -> EmacsResult<()> {
     Ok(())
 }
 
@@ -92,27 +98,27 @@ struct DissectedFilename {
 trait LocalEnv<'a> {
     fn nil(&self) -> Value<'a>;
     fn t(&self) -> Value<'a>;
-    fn car(&self, list: Value<'a>) -> Result<Value<'a>>;
-    fn cdr(&self, list: Value<'a>) -> Result<Value<'a>>;
-    fn nth(&self, idx: usize, list: Value<'a>) -> Result<Value<'a>>;
-    fn cons(&self, car_v: Value<'a>, cdr_v: Value<'a>) -> Result<Value<'a>>;
-    fn nreverse(&self, list: Value<'a>) -> Result<Value<'a>>;
-    fn tramp_dissect_file_name_el(&self, filename: Value<'a>) -> Result<Value<'a>>;
-    fn tramp_dissect_file_name(&self, filename: Value<'a>) -> Result<DissectedFilename>;
-    fn read_passwd(&self, prompt: &str, confirm: bool) -> Result<String>;
-    fn read_string(&self, prompt: &str) -> Result<String>;
-    fn y_or_n_p(&self, prompt: &str) -> Result<bool>;
-    fn insert(&self, text: &str) -> Result<()>;
-    fn replace_buffer_contents(&self, other_buf: Value<'a>) -> Result<()>;
-    fn set_buffer(&self, buffer: Value<'a>) -> Result<()>;
-    fn current_buffer(&self) -> Result<Value<'a>>;
-    fn generate_new_buffer(&self, name: &str) -> Result<Value<'a>>;
-    fn kill_buffer(&self, buffer: Value<'a>) -> Result<()>;
-    fn buffer_substring_no_properties(&self, start: usize, end: usize) -> Result<String>;
-    fn buffer_size(&self) -> Result<usize>;
-    fn default_directory(&self) -> Result<DissectedFilename>;
-    fn string_match_p(&self, regexp: Value<'a>, match_string: &str) -> Result<bool>;
-    fn build_list(&self, values: &[Value<'a>]) -> Result<Value<'a>>;
+    fn car(&self, list: Value<'a>) -> EmacsResult<Value<'a>>;
+    fn cdr(&self, list: Value<'a>) -> EmacsResult<Value<'a>>;
+    fn nth(&self, idx: usize, list: Value<'a>) -> EmacsResult<Value<'a>>;
+    fn cons(&self, car_v: Value<'a>, cdr_v: Value<'a>) -> EmacsResult<Value<'a>>;
+    fn nreverse(&self, list: Value<'a>) -> EmacsResult<Value<'a>>;
+    fn tramp_dissect_file_name_el(&self, filename: Value<'a>) -> EmacsResult<Value<'a>>;
+    fn tramp_dissect_file_name(&self, filename: Value<'a>) -> EmacsResult<DissectedFilename>;
+    fn read_passwd(&self, prompt: &str, confirm: bool) -> EmacsResult<String>;
+    fn read_string(&self, prompt: &str) -> EmacsResult<String>;
+    fn y_or_n_p(&self, prompt: &str) -> EmacsResult<bool>;
+    fn insert(&self, text: &str) -> EmacsResult<()>;
+    fn replace_buffer_contents(&self, other_buf: Value<'a>) -> EmacsResult<()>;
+    fn set_buffer(&self, buffer: Value<'a>) -> EmacsResult<()>;
+    fn current_buffer(&self) -> EmacsResult<Value<'a>>;
+    fn generate_new_buffer(&self, name: &str) -> EmacsResult<Value<'a>>;
+    fn kill_buffer(&self, buffer: Value<'a>) -> EmacsResult<()>;
+    fn buffer_substring_no_properties(&self, start: usize, end: usize) -> EmacsResult<String>;
+    fn buffer_size(&self) -> EmacsResult<usize>;
+    fn default_directory(&self) -> EmacsResult<DissectedFilename>;
+    fn string_match_p(&self, regexp: Value<'a>, match_string: &str) -> EmacsResult<bool>;
+    fn build_list(&self, values: &[Value<'a>]) -> EmacsResult<Value<'a>>;
 }
 
 impl<'a> LocalEnv<'a> for &'a Env {
@@ -124,31 +130,31 @@ impl<'a> LocalEnv<'a> for &'a Env {
         t.bind(self)
     }
 
-    fn car(&self, list: Value<'a>) -> Result<Value<'a>> {
+    fn car(&self, list: Value<'a>) -> EmacsResult<Value<'a>> {
         self.call(car, &[list])
     }
 
-    fn cdr(&self, list: Value<'a>) -> Result<Value<'a>> {
+    fn cdr(&self, list: Value<'a>) -> EmacsResult<Value<'a>> {
         self.call(cdr, &[list])
     }
 
-    fn nth(&self, idx: usize, list: Value<'a>) -> Result<Value<'a>> {
+    fn nth(&self, idx: usize, list: Value<'a>) -> EmacsResult<Value<'a>> {
         self.call(nth, &[idx.into_lisp(self)?, list])
     }
 
-    fn cons(&self, car_v: Value<'a>, cdr_v: Value<'a>) -> Result<Value<'a>> {
+    fn cons(&self, car_v: Value<'a>, cdr_v: Value<'a>) -> EmacsResult<Value<'a>> {
         self.call(cons, &[car_v, cdr_v])
     }
 
-    fn nreverse(&self, list: Value<'a>) -> Result<Value<'a>> {
+    fn nreverse(&self, list: Value<'a>) -> EmacsResult<Value<'a>> {
         self.call(nreverse, &[list])
     }
 
-    fn tramp_dissect_file_name_el(&self, filename: Value<'a>) -> Result<Value<'a>> {
-        self.call(tramp_dissect_file_name, &[filename])
+    fn tramp_dissect_file_name_el(&self, filename: Value<'a>) -> EmacsResult<Value<'a>> {
+        self.call(tramp_dissect_file_name, &[filename.clone()])
     }
 
-    fn tramp_dissect_file_name(&self, filename: Value<'a>) -> Result<DissectedFilename> {
+    fn tramp_dissect_file_name(&self, filename: Value<'a>) -> EmacsResult<DissectedFilename> {
         let dissected_v = self.tramp_dissect_file_name_el(filename)?;
 
         Ok(DissectedFilename {
@@ -160,71 +166,71 @@ impl<'a> LocalEnv<'a> for &'a Env {
         })
     }
 
-    fn read_passwd(&self, prompt: &str, confirm: bool) -> Result<String> {
+    fn read_passwd(&self, prompt: &str, confirm: bool) -> EmacsResult<String> {
         let confirm = if confirm { t } else { nil };
         let passwd_v = self.call(read_passwd, &[prompt.into_lisp(self)?, confirm.bind(self)])?;
         String::from_lisp(passwd_v)
     }
 
-    fn read_string(&self, prompt: &str) -> Result<String> {
+    fn read_string(&self, prompt: &str) -> EmacsResult<String> {
         let result_v = self.call(read_string, &[prompt.into_lisp(self)?])?;
         String::from_lisp(result_v)
     }
 
-    fn y_or_n_p(&self, prompt: &str) -> Result<bool> {
+    fn y_or_n_p(&self, prompt: &str) -> EmacsResult<bool> {
         let result_v = self.call(y_or_n_p, &[prompt.into_lisp(self)?])?;
         Ok(result_v.is_not_nil())
     }
 
-    fn insert(&self, text: &str) -> Result<()> {
+    fn insert(&self, text: &str) -> EmacsResult<()> {
         self.call(insert, &[text.into_lisp(self)?])?;
         Ok(())
     }
 
-    fn replace_buffer_contents(&self, other_buf: Value<'a>) -> Result<()> {
+    fn replace_buffer_contents(&self, other_buf: Value<'a>) -> EmacsResult<()> {
         self.call(replace_buffer_contents, &[other_buf])?;
         Ok(())
     }
 
-    fn set_buffer(&self, buffer: Value<'a>) -> Result<()> {
+    fn set_buffer(&self, buffer: Value<'a>) -> EmacsResult<()> {
         self.call(set_buffer, &[buffer])?;
         Ok(())
     }
 
-    fn current_buffer(&self) -> Result<Value<'a>> {
+    fn current_buffer(&self) -> EmacsResult<Value<'a>> {
         self.call(current_buffer, &[])
     }
 
-    fn generate_new_buffer(&self, name: &str) -> Result<Value<'a>> {
+    fn generate_new_buffer(&self, name: &str) -> EmacsResult<Value<'a>> {
         self.call(generate_new_buffer, &[name.into_lisp(self)?])
     }
 
-    fn kill_buffer(&self, buffer: Value<'a>) -> Result<()> {
+    fn kill_buffer(&self, buffer: Value<'a>) -> EmacsResult<()> {
         self.call(kill_buffer, &[buffer])?;
         Ok(())
     }
 
-    fn buffer_substring_no_properties(&self, begin: usize, end: usize) -> Result<String> {
+    fn buffer_substring_no_properties(&self, begin: usize, end: usize) -> EmacsResult<String> {
         String::from_lisp(self.call(
             buffer_substring_no_properties,
             &[begin.into_lisp(self)?, end.into_lisp(self)?],
         )?)
     }
 
-    fn buffer_size(&self) -> Result<usize> {
+    fn buffer_size(&self) -> EmacsResult<usize> {
         usize::from_lisp(self.call(buffer_size, &[])?)
     }
 
-    fn default_directory(&self) -> Result<DissectedFilename> {
+    fn default_directory(&self) -> EmacsResult<DissectedFilename> {
         self.tramp_dissect_file_name(self.intern("default-directory")?)
     }
 
-    fn string_match_p(&self, regexp: Value<'a>, match_string: &str) -> Result<bool> {
+    fn string_match_p(&self, regexp: Value<'a>, match_string: &str) -> EmacsResult<bool> {
         let result = self.call(string_match_p, &[regexp, match_string.into_lisp(self)?])?;
         Ok(result.is_not_nil())
     }
 
-    fn build_list(&self, values: &[Value<'a>]) -> Result<Value<'a>> {
+    fn build_list(&self, values: &[Value<'a>]) -> EmacsResult<Value<'a>> {
         let mut result = nil.bind(self);
         for val in values.into_iter().rev() {
             result = self.cons(*val, result)?;
@@ -235,11 +241,11 @@ impl<'a> LocalEnv<'a> for &'a Env {
 
 // Get around foreign type rule
 trait MyIntoLisp<'e> {
-    fn into_lisp(self, env: &'e Env) -> Result<Value<'e>>;
+    fn into_lisp(self, env: &'e Env) -> EmacsResult<Value<'e>>;
 }
 
 impl<'e> MyIntoLisp<'e> for SystemTime {
-    fn into_lisp(self, env: &'e Env) -> Result<Value<'e>> {
+    fn into_lisp(self, env: &'e Env) -> EmacsResult<Value<'e>> {
         let dur = self.duration_since(SystemTime::UNIX_EPOCH)?;
         let s = dur.as_secs();
         let ns = dur.subsec_nanos();
@@ -257,11 +263,11 @@ impl<'e> MyIntoLisp<'e> for SystemTime {
 }
 
 trait ValueExt<'e> {
-    fn cons(self, cdr_v: impl IntoLisp<'e>) -> Result<Value<'e>>;
+    fn cons(self, cdr_v: impl IntoLisp<'e>) -> EmacsResult<Value<'e>>;
 }
 
 impl<'e> ValueExt<'e> for Value<'e> {
-    fn cons(self, cdr_v: impl IntoLisp<'e>) -> Result<Value<'e>> {
+    fn cons(self, cdr_v: impl IntoLisp<'e>) -> EmacsResult<Value<'e>> {
         self.env.cons(cdr_v.into_lisp(self.env)?, self)
     }
 }
@@ -296,7 +302,7 @@ fn ssh_auth_callback(
         .map_err(|e: anyhow::Error| SshError::Fatal(e.to_string()))
 }
 
-fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
+fn get_connection(user: &str, host: &str, env: &Env) -> EmacsResult<Rc<Session>> {
     let connection_str = format!("{}@{}", user, host);
     SESSIONS.with(|sessions| {
         let mut sessions = sessions.try_borrow_mut()?;
@@ -316,7 +322,21 @@ fn get_connection(user: &str, host: &str, env: &Env) -> Result<Rc<Session>> {
     })
 }
 
-fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
+fn get_sftp(user: &str, host: &str, session: &Session) -> EmacsResult<Rc<Sftp>> {
+    let connection_str = format!("{}@{}", user, host);
+    SFTPS.with(|sftps| {
+        let mut sftps = sftps.try_borrow_mut()?;
+        if let Some(sftp) = sftps.get(&connection_str) {
+            Ok(sftp.clone())
+        } else {
+            let sftp = Rc::new(session.sftp()?);
+            sftps.insert(connection_str, sftp.clone());
+            Ok(sftp)
+        }
+    })
+}
+
+fn init_connection(user: &str, host: &str, env: &Env) -> EmacsResult<Session> {
     let session = Session::new()?;
     session.set_option(SshOption::User(Some(user.to_string())))?;
     session.set_option(SshOption::Hostname(host.to_string()))?;
@@ -363,6 +383,49 @@ fn init_connection(user: &str, host: &str, env: &Env) -> Result<Session> {
     })
 }
 
+#[derive(Error, Debug)]
+enum HandlerError {
+    #[error("{0}")]
+    Emacs(#[from] EmacsError),
+    #[error("{0}")]
+    Sftp(#[from] SftpError),
+    #[error("{0}")]
+    Ssh(#[from] SshError),
+}
+
+type HandlerResult<'a> = Result<Value<'a>, HandlerError>;
+
+fn with_sftp<'a>(
+    env: &'a Env,
+    tramp_path: Value<'a>,
+    handler: impl Fn(&DissectedFilename, &Session, &Sftp) -> HandlerResult<'a>,
+) -> EmacsResult<Value<'a>> {
+    let mut error: Option<EmacsError> = None;
+    for retry in 0..RETRIES {
+        let dissected = env.tramp_dissect_file_name(tramp_path)?;
+        let session = get_connection(&dissected.user, &dissected.host, &env)?;
+        let sftp = get_sftp(&dissected.user, &dissected.host, &*session)?;
+        match handler(&dissected, &session, &sftp) {
+            Ok(result) => return Ok(result),
+            Err(HandlerError::Sftp(e)) => {
+                if !env.y_or_n_p(&format!(
+                    "ssh error [{}] would you like to reconnect? ",
+                    e.to_string()
+                ))? {
+                    return Err(e.into());
+                } else {
+                    error = Some(e.into())
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    bail!(format!(
+        "Too many retries, last error: {}",
+        error.expect("Retried with no error").to_string()
+    ))
+}
+
 #[defun]
 fn write_region(
     env: &Env,
@@ -373,7 +436,7 @@ fn write_region(
     visit: Option<Value>,
     lockname: Option<Value>,
     mustbenew: Option<Value>,
-) -> Result<()> {
+) -> EmacsResult<()> {
     let dissected = env.tramp_dissect_file_name(filename)?;
 
     let (str_contents, begin) = if let Some(start) = start {
@@ -454,7 +517,7 @@ fn insert_file_contents1(
     begin: Option<usize>,
     end: Option<usize>,
     replace: Option<Value>,
-) -> Result<()> {
+) -> EmacsResult<()> {
     let dissected = env.tramp_dissect_file_name(filename)?;
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
 
@@ -511,7 +574,7 @@ fn insert_file_contents1(
 }
 
 #[defun]
-fn file_exists_p<'a>(env: &'a Env, filename: Value<'a>) -> Result<Value<'a>> {
+fn file_exists_p<'a>(env: &'a Env, filename: Value<'a>) -> EmacsResult<Value<'a>> {
     let dissected = env.tramp_dissect_file_name(filename)?;
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp = session.sftp()?;
@@ -537,7 +600,7 @@ fn directory_files<'a>(
     match_regexp: Option<Value<'a>>,
     nosort: Option<Value<'a>>,
     count: Option<usize>,
-) -> Result<Value<'a>> {
+) -> EmacsResult<Value<'a>> {
     directory_files_impl(
         env,
         directory,
@@ -559,7 +622,7 @@ fn directory_files_and_attributes<'a>(
     nosort: Option<Value<'a>>,
     id_format: Option<Value<'a>>,
     count: Option<usize>,
-) -> Result<Value<'a>> {
+) -> EmacsResult<Value<'a>> {
     directory_files_impl(
         env,
         directory,
@@ -581,7 +644,7 @@ fn directory_files_impl<'a>(
     count: Option<usize>,
     id_format: Option<Value<'a>>,
     with_attributes: bool,
-) -> Result<Value<'a>> {
+) -> EmacsResult<Value<'a>> {
     let dissected = env.tramp_dissect_file_name(directory)?;
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp = session.sftp()?;
@@ -623,7 +686,7 @@ fn directory_files_impl<'a>(
                     let lisp_attributes = metadata_to_file_attributes(
                         env,
                         &sftp,
-                        id_format.as_ref().unwrap(),
+                        *id_format.as_ref().unwrap(),
                         &full_dir,
                         &dissected,
                         &attributes,
@@ -652,7 +715,7 @@ fn directory_files_impl<'a>(
 }
 
 #[defun]
-fn delete_file(env: &Env, filename: Value, trash: Value) -> Result<()> {
+fn delete_file(env: &Env, filename: Value, trash: Value) -> EmacsResult<()> {
     let dissected = env.tramp_dissect_file_name(filename)?;
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp = session.sftp()?;
@@ -663,12 +726,12 @@ fn delete_file(env: &Env, filename: Value, trash: Value) -> Result<()> {
 fn metadata_to_file_attributes<'a>(
     env: &'a Env,
     sftp: &Sftp,
-    id_format: &Value<'a>,
+    id_format: Value<'a>,
     full_dir: &String,
     dissected: &DissectedFilename,
     metadata: &Metadata,
     fs_metadata: &VfsMetadata,
-) -> Result<Value<'a>> {
+) -> EmacsResult<Value<'a>> {
     let mut hasher = DefaultHasher::new();
     dissected.user.hash(&mut hasher);
     dissected.host.hash(&mut hasher);
@@ -766,7 +829,7 @@ fn file_attributes<'a>(
     env: &'a Env,
     filename: Value<'a>,
     id_format: Value<'a>,
-) -> Result<Value<'a>> {
+) -> EmacsResult<Value<'a>> {
     let dissected = env.tramp_dissect_file_name(filename)?;
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp = session.sftp()?;
@@ -796,7 +859,7 @@ fn file_attributes<'a>(
     metadata_to_file_attributes(
         env,
         &sftp,
-        &id_format,
+        id_format,
         &dirname,
         &dissected,
         &metadata,
