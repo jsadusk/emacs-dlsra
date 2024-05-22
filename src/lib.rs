@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 emacs::plugin_is_GPL_compatible!();
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use libssh_rs::Error as SshError;
 use libssh_rs::*;
 
@@ -112,6 +112,7 @@ trait LocalEnv<'a> {
     fn buffer_size(&self) -> Result<usize>;
     fn default_directory(&self) -> Result<DissectedFilename>;
     fn string_match_p(&self, regexp: Value<'a>, match_string: &str) -> Result<bool>;
+    fn build_list(&self, values: &[Value<'a>]) -> Result<Value<'a>>;
 }
 
 impl<'a> LocalEnv<'a> for &'a Env {
@@ -222,6 +223,14 @@ impl<'a> LocalEnv<'a> for &'a Env {
         let result = self.call(string_match_p, &[regexp, match_string.into_lisp(self)?])?;
         Ok(result.is_not_nil())
     }
+
+    fn build_list(&self, values: &[Value<'a>]) -> Result<Value<'a>> {
+        let mut result = nil.bind(self);
+        for val in values.into_iter().rev() {
+            result = self.cons(*val, result)?;
+        }
+        Ok(result)
+    }
 }
 
 // Get around foreign type rule
@@ -242,7 +251,8 @@ impl<'e> MyIntoLisp<'e> for SystemTime {
         let micro = (ns / 1000).into_lisp(env)?;
         let pico = (ns % 1000 * 1000).into_lisp(env)?;
 
-        pico.cons(micro)?.cons(lo_time)?.cons(hi_time)
+        let timestamp = env.build_list(&[hi_time, lo_time, micro, pico])?;
+        Ok(timestamp)
     }
 }
 
@@ -528,14 +538,59 @@ fn directory_files<'a>(
     nosort: Option<Value<'a>>,
     count: Option<usize>,
 ) -> Result<Value<'a>> {
+    directory_files_impl(
+        env,
+        directory,
+        full_name,
+        match_regexp,
+        nosort,
+        count,
+        None,
+        false,
+    )
+}
+
+#[defun]
+fn directory_files_and_attributes<'a>(
+    env: &'a Env,
+    directory: Value<'a>,
+    full_name: Option<Value<'a>>,
+    match_regexp: Option<Value<'a>>,
+    nosort: Option<Value<'a>>,
+    id_format: Option<Value<'a>>,
+    count: Option<usize>,
+) -> Result<Value<'a>> {
+    directory_files_impl(
+        env,
+        directory,
+        full_name,
+        match_regexp,
+        nosort,
+        count,
+        id_format,
+        true,
+    )
+}
+
+fn directory_files_impl<'a>(
+    env: &'a Env,
+    directory: Value<'a>,
+    full_name: Option<Value<'a>>,
+    match_regexp: Option<Value<'a>>,
+    nosort: Option<Value<'a>>,
+    count: Option<usize>,
+    id_format: Option<Value<'a>>,
+    with_attributes: bool,
+) -> Result<Value<'a>> {
     let dissected = env.tramp_dissect_file_name(directory)?;
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp = session.sftp()?;
     let dir = sftp.open_dir(&dissected.filename)?;
     let mut dirlist: Value<'a> = nil.bind(env);
+    let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
 
     let full_dir = if dissected.filename.ends_with("/") {
-        dissected.filename
+        dissected.filename.clone()
     } else {
         dissected.filename.clone() + "/"
     };
@@ -563,12 +618,32 @@ fn directory_files<'a>(
                     Some(_) => full_dir.clone() + short_name,
                     None => short_name.to_string(),
                 };
-                dirlist = env.cons(name.into_lisp(env)?, dirlist)?
+                let lisp_name = name.into_lisp(env)?;
+                let entry = if with_attributes {
+                    let lisp_attributes = metadata_to_file_attributes(
+                        env,
+                        &sftp,
+                        id_format.as_ref().unwrap(),
+                        &full_dir,
+                        &dissected,
+                        &attributes,
+                        &fs_metadata,
+                    )?;
+                    let mut entry = nil.bind(env);
+                    entry = env.cons(lisp_attributes, entry)?;
+                    entry = env.cons(lisp_name, entry)?;
+                    entry
+                } else {
+                    lisp_name
+                };
+                dirlist = env.cons(entry, dirlist)?;
             }
             None => break,
         }
     }
 
+    env.message("changed again")?;
+    panic!("aaargh");
     if nosort.is_some() {
         Ok(dirlist)
     } else {
@@ -589,6 +664,7 @@ fn metadata_to_file_attributes<'a>(
     env: &'a Env,
     sftp: &Sftp,
     id_format: &Value<'a>,
+    full_dir: &String,
     dissected: &DissectedFilename,
     metadata: &Metadata,
     fs_metadata: &VfsMetadata,
@@ -602,7 +678,12 @@ fn metadata_to_file_attributes<'a>(
     let fs_id = env.cons(host_id, vfs_id)?;
 
     hasher = DefaultHasher::new();
-    dissected.filename.hash(&mut hasher);
+    let full_filename = format!(
+        "{}{}",
+        full_dir,
+        metadata.name().context("Unable to get filename")?
+    );
+    full_filename.hash(&mut hasher);
     let file_num = (hasher.finish() % i64::MAX as u64) as i64;
     let file_num = file_num.into_lisp(env)?;
 
@@ -661,7 +742,7 @@ fn metadata_to_file_attributes<'a>(
 
     let filetype = match metadata.file_type().ok_or(anyhow!("Missing file type"))? {
         FileType::Directory => t.bind(env),
-        FileType::Symlink => sftp.read_link(&dissected.filename)?.into_lisp(env)?,
+        FileType::Symlink => sftp.read_link(&full_filename)?.into_lisp(env)?,
         _ => nil.bind(env),
     };
 
@@ -690,11 +771,12 @@ fn file_attributes<'a>(
     let session = get_connection(&dissected.user, &dissected.host, &env)?;
     let sftp = session.sftp()?;
 
+    let path = Path::new(&dissected.filename);
+    let dirname = path.parent().unwrap().to_str().unwrap().to_string();
+    let dir = sftp.open_dir(&dirname)?;
     // For some reason you get more metadata from reading the directory than
     // you do just getting file attributes directly
     let metadata = {
-        let path = Path::new(&dissected.filename);
-        let dir = sftp.open_dir(path.parent().unwrap().to_str().unwrap())?;
         loop {
             match dir.read_dir().transpose()? {
                 Some(metadata) => match metadata.name() {
@@ -711,7 +793,15 @@ fn file_attributes<'a>(
     };
     let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
 
-    metadata_to_file_attributes(env, &sftp, &id_format, &dissected, &metadata, &fs_metadata)
+    metadata_to_file_attributes(
+        env,
+        &sftp,
+        &id_format,
+        &dirname,
+        &dissected,
+        &metadata,
+        &fs_metadata,
+    )
 }
 
 fn octal_permissions_to_string(permissions: u32) -> String {
