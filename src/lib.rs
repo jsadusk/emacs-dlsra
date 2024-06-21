@@ -1,17 +1,17 @@
 use emacs::Error as EmacsError;
 use emacs::Result as EmacsResult;
 use emacs::{defun, Env, FromLisp, IntoLisp, Value};
-use libssh_rs::sys::sftp_readlink;
 use libssh_rs::Error as SshError;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::error::Error;
-use std::fs::metadata;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io;
+use std::io::Error as IOError;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::rc::Rc;
-use std::time::SystemTime;
+use std::str::Utf8Error;
+use std::time::{Instant, SystemTime};
 use thiserror::Error;
 
 emacs::plugin_is_GPL_compatible!();
@@ -391,9 +391,23 @@ enum HandlerError {
     Sftp(#[from] SftpError),
     #[error("{0}")]
     Ssh(#[from] SshError),
+    #[error("{0}")]
+    Io(#[from] IOError),
+    #[error("{0}")]
+    Utf8(#[from] Utf8Error),
 }
 
 type HandlerResult<'a> = Result<Value<'a>, HandlerError>;
+
+trait Handle<T> {
+    fn handle(self) -> Result<T, HandlerError>;
+}
+
+impl<T, E: Into<HandlerError>> Handle<T> for Result<T, E> {
+    fn handle(self) -> Result<T, HandlerError> {
+        self.map_err(|e| e.into())
+    }
+}
 
 fn with_sftp<'a>(
     env: &'a Env,
@@ -427,169 +441,168 @@ fn with_sftp<'a>(
 }
 
 #[defun]
-fn write_region(
-    env: &Env,
+fn write_region<'a>(
+    env: &'a Env,
     start: Option<Value>,
     end: Option<Value>,
-    filename: Value,
+    filename: Value<'a>,
     append: Option<Value>,
     visit: Option<Value>,
     lockname: Option<Value>,
     mustbenew: Option<Value>,
-) -> EmacsResult<()> {
-    let dissected = env.tramp_dissect_file_name(filename)?;
-
-    let (str_contents, begin) = if let Some(start) = start {
-        (
-            String::from_lisp(start).ok(),
-            usize::from_lisp(start).unwrap_or(0),
-        )
-    } else {
-        (None, 0)
-    };
-
-    let end = if !str_contents.is_none() {
-        str_contents.as_ref().unwrap().len()
-    } else if start.is_none() || end.is_none() {
-        env.buffer_size()?
-    } else {
-        usize::from_lisp(end.unwrap())?
-    };
-
-    let (seek, append_file) = if let Some(append_val) = append {
-        if let Some(seek) = u64::from_lisp(append_val).ok() {
-            (Some(seek), false)
+) -> EmacsResult<Value<'a>> {
+    with_sftp(env, filename, |dissected, session, sftp| {
+        let (str_contents, begin) = if let Some(start) = start {
+            (
+                String::from_lisp(start).ok(),
+                usize::from_lisp(start).unwrap_or(0),
+            )
         } else {
-            (None, true)
-        }
-    } else {
-        (None, false)
-    };
+            (None, 0)
+        };
 
-    let session = get_connection(&dissected.user, &dissected.host, &env)?;
-    let sftp_sess = session.sftp()?;
-    let mut open_mode = OpenFlags::WRITE_ONLY | OpenFlags::CREATE;
-    if append_file {
-        open_mode |= OpenFlags::APPEND;
-    } else if begin == 0 {
-        open_mode |= OpenFlags::TRUNCATE;
-    }
-    let mut rfile = sftp_sess.open(&dissected.filename, open_mode, 0o644)?;
+        let end = if !str_contents.is_none() {
+            str_contents.as_ref().unwrap().len()
+        } else if start.is_none() || end.is_none() {
+            env.buffer_size()?.into()
+        } else {
+            usize::from_lisp(end.unwrap())?
+        };
 
-    if !append_file {
-        if let Some(seek) = seek {
-            rfile.seek(SeekFrom::Start(seek))?;
-        }
-    }
-
-    if let Some(str_contents) = str_contents {
-        rfile.write(str_contents.as_bytes())?;
-    } else {
-        let mut cur_byte = begin + 1;
-
-        loop {
-            let substring_end = if end - cur_byte > BLOCKSIZE {
-                cur_byte + BLOCKSIZE
+        let (seek, append_file) = if let Some(append_val) = append {
+            if let Some(seek) = u64::from_lisp(append_val).ok() {
+                (Some(seek), false)
             } else {
-                end
-            };
+                (None, true)
+            }
+        } else {
+            (None, false)
+        };
 
-            let bufstring = env.buffer_substring_no_properties(cur_byte, substring_end)?;
-            let written = rfile.write(bufstring.as_bytes())?;
-            cur_byte += written;
+        //let session = get_connection(&dissected.user, &dissected.host, &env)?;
+        //let sftp_sess = session.sftp()?;
+        let mut open_mode = OpenFlags::WRITE_ONLY | OpenFlags::CREATE;
+        if append_file {
+            open_mode |= OpenFlags::APPEND;
+        } else if begin == 0 {
+            open_mode |= OpenFlags::TRUNCATE;
+        }
+        let mut rfile = sftp.open(&dissected.filename, open_mode, 0o644)?;
 
-            if cur_byte == end {
-                break;
-            } else if cur_byte > end {
-                bail!("Wrote too much?");
+        if !append_file {
+            if let Some(seek) = seek {
+                rfile.seek(SeekFrom::Start(seek)).handle()?;
             }
         }
-    }
 
-    Ok(())
+        if let Some(str_contents) = str_contents {
+            rfile.write(str_contents.as_bytes()).handle()?;
+        } else {
+            let mut cur_byte = begin + 1;
+
+            loop {
+                let substring_end = if end - cur_byte > BLOCKSIZE {
+                    cur_byte + BLOCKSIZE
+                } else {
+                    end
+                };
+
+                let bufstring = env.buffer_substring_no_properties(cur_byte, substring_end)?;
+                let written = rfile.write(bufstring.as_bytes()).handle()?;
+                cur_byte += written;
+
+                if cur_byte == end {
+                    break;
+                } else if cur_byte > end {
+                    return Err(anyhow!("Wrote too much?").into());
+                }
+            }
+        }
+
+        Ok(t.bind(env))
+    })
 }
 
 #[defun]
-fn insert_file_contents1(
-    env: &Env,
-    filename: Value,
+fn insert_file_contents<'a>(
+    env: &'a Env,
+    filename: Value<'a>,
     visit: Option<Value>,
     begin: Option<usize>,
     end: Option<usize>,
     replace: Option<Value>,
-) -> EmacsResult<()> {
-    let dissected = env.tramp_dissect_file_name(filename)?;
-    let session = get_connection(&dissected.user, &dissected.host, &env)?;
+) -> EmacsResult<Value<'a>> {
+    with_sftp(env, filename, |dissected, session, sftp| {
+        let mut rfile = sftp.open(&dissected.filename, OpenFlags::READ_ONLY, 0)?;
+        if let Some(off) = begin {
+            rfile.seek(SeekFrom::Start(off as u64))?;
+        }
 
-    let sftp_sess = session.sftp()?;
-    let mut rfile = sftp_sess.open(&dissected.filename, OpenFlags::READ_ONLY, 0)?;
-    if let Some(off) = begin {
-        rfile.seek(SeekFrom::Start(off as u64))?;
-    }
+        let (orig_buf, tmp_buf) = if let Some(_) = replace {
+            let tmp_buf = env.generate_new_buffer("*tmp*")?;
+            let orig_buf = env.current_buffer()?;
+            env.set_buffer(tmp_buf)?;
+            (orig_buf, tmp_buf)
+        } else {
+            (env.nil(), env.nil())
+        };
 
-    let (orig_buf, tmp_buf) = if let Some(_) = replace {
-        let tmp_buf = env.generate_new_buffer("*tmp*")?;
-        let orig_buf = env.current_buffer()?;
-        env.set_buffer(tmp_buf)?;
-        (orig_buf, tmp_buf)
-    } else {
-        (env.nil(), env.nil())
-    };
+        let mut total_bytes: usize = 0;
+        let mut buf = [0; BLOCKSIZE];
+        loop {
+            let bufslice: &mut [u8] = if let Some(end) = end {
+                if total_bytes >= end {
+                    break;
+                }
 
-    let mut total_bytes: usize = 0;
-    let mut buf = [0; BLOCKSIZE];
-    loop {
-        let bufslice: &mut [u8] = if let Some(end) = end {
-            if total_bytes >= end {
+                let remaining: usize = end - total_bytes;
+                if remaining < BLOCKSIZE {
+                    &mut buf[0..remaining]
+                } else {
+                    &mut buf[..]
+                }
+            } else {
+                &mut buf[..]
+            };
+
+            let bytes = rfile.read(bufslice)?;
+            if bytes == 0 {
                 break;
             }
 
-            let remaining: usize = end - total_bytes;
-            if remaining < BLOCKSIZE {
-                &mut buf[0..remaining]
-            } else {
-                &mut buf[..]
-            }
-        } else {
-            &mut buf[..]
-        };
+            env.insert(&std::str::from_utf8(&buf[0..bytes])?)?;
 
-        let bytes = rfile.read(bufslice)?;
-        if bytes == 0 {
-            break;
+            total_bytes += bytes;
         }
 
-        env.insert(&std::str::from_utf8(&buf[0..bytes])?)?;
+        if let Some(_) = replace {
+            env.set_buffer(orig_buf)?;
+            env.replace_buffer_contents(tmp_buf)?;
+            env.kill_buffer(tmp_buf)?;
+        }
 
-        total_bytes += bytes;
-    }
-
-    if let Some(_) = replace {
-        env.set_buffer(orig_buf)?;
-        env.replace_buffer_contents(tmp_buf)?;
-        env.kill_buffer(tmp_buf)?;
-    }
-
-    Ok(())
+        Ok(env.nil())
+    })
 }
 
 #[defun]
 fn file_exists_p<'a>(env: &'a Env, filename: Value<'a>) -> EmacsResult<Value<'a>> {
-    let dissected = env.tramp_dissect_file_name(filename)?;
-    let session = get_connection(&dissected.user, &dissected.host, &env)?;
-    let sftp = session.sftp()?;
-    let res = sftp.open(&dissected.filename, OpenFlags::READ_ONLY, 0);
-    match res {
-        Ok(_) => Ok(t.bind(env)),
-        Err(libssh_rs::Error::Sftp(e)) => {
-            let e: std::io::Error = e.into();
-            match e.kind() {
-                std::io::ErrorKind::NotFound => Ok(nil.bind(env)),
-                _ => Err(e.into()),
+    with_sftp(env, filename, |dissected, session, sftp| {
+        let now = Instant::now();
+        let res = sftp.open(&dissected.filename, OpenFlags::READ_ONLY, 0);
+        env.message(format!("time to open sftp file {:?}", now.elapsed()))?;
+        match res {
+            Ok(_) => Ok(t.bind(env)),
+            Err(libssh_rs::Error::Sftp(e)) => {
+                let e: std::io::Error = e.into();
+                match e.kind() {
+                    std::io::ErrorKind::NotFound => Ok(nil.bind(env)),
+                    _ => Err(e.into()),
+                }
             }
+            Err(e) => Err(e.into()),
         }
-        Err(e) => Err(e.into()),
-    }
+    })
 }
 
 #[defun]
@@ -645,82 +658,79 @@ fn directory_files_impl<'a>(
     id_format: Option<Value<'a>>,
     with_attributes: bool,
 ) -> EmacsResult<Value<'a>> {
-    let dissected = env.tramp_dissect_file_name(directory)?;
-    let session = get_connection(&dissected.user, &dissected.host, &env)?;
-    let sftp = session.sftp()?;
-    let dir = sftp.open_dir(&dissected.filename)?;
-    let mut dirlist: Value<'a> = nil.bind(env);
-    let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
+    with_sftp(env, directory, |dissected, session, sftp| {
+        let dir = sftp.open_dir(&dissected.filename)?;
+        let mut dirlist: Value<'a> = nil.bind(env);
+        let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
 
-    let full_dir = if dissected.filename.ends_with("/") {
-        dissected.filename.clone()
-    } else {
-        dissected.filename.clone() + "/"
-    };
+        let full_dir = if dissected.filename.ends_with("/") {
+            dissected.filename.clone()
+        } else {
+            dissected.filename.clone() + "/"
+        };
 
-    let mut counter = 0;
-    loop {
-        if let Some(count) = count {
-            if counter >= count {
-                break;
+        let mut counter = 0;
+        loop {
+            if let Some(count) = count {
+                if counter >= count {
+                    break;
+                }
+                counter += 1;
             }
-            counter += 1;
+
+            match dir.read_dir().transpose()? {
+                Some(attributes) => {
+                    let short_name = attributes.name().unwrap();
+
+                    if let Some(match_regexp) = match_regexp {
+                        if !env.string_match_p(match_regexp, short_name)? {
+                            continue;
+                        }
+                    };
+
+                    let name = match full_name {
+                        Some(_) => full_dir.clone() + short_name,
+                        None => short_name.to_string(),
+                    };
+                    let lisp_name = name.into_lisp(env)?;
+                    let entry = if with_attributes {
+                        let lisp_attributes = metadata_to_file_attributes(
+                            env,
+                            &sftp,
+                            *id_format.as_ref().unwrap(),
+                            &full_dir,
+                            &dissected,
+                            &attributes,
+                            &fs_metadata,
+                        )?;
+                        let mut entry = nil.bind(env);
+                        entry = env.cons(lisp_attributes, entry)?;
+                        entry = env.cons(lisp_name, entry)?;
+                        entry
+                    } else {
+                        lisp_name
+                    };
+                    dirlist = env.cons(entry, dirlist)?;
+                }
+                None => break,
+            }
         }
 
-        match dir.read_dir().transpose()? {
-            Some(attributes) => {
-                let short_name = attributes.name().unwrap();
-
-                if let Some(match_regexp) = match_regexp {
-                    if !env.string_match_p(match_regexp, short_name)? {
-                        continue;
-                    }
-                };
-
-                let name = match full_name {
-                    Some(_) => full_dir.clone() + short_name,
-                    None => short_name.to_string(),
-                };
-                let lisp_name = name.into_lisp(env)?;
-                let entry = if with_attributes {
-                    let lisp_attributes = metadata_to_file_attributes(
-                        env,
-                        &sftp,
-                        *id_format.as_ref().unwrap(),
-                        &full_dir,
-                        &dissected,
-                        &attributes,
-                        &fs_metadata,
-                    )?;
-                    let mut entry = nil.bind(env);
-                    entry = env.cons(lisp_attributes, entry)?;
-                    entry = env.cons(lisp_name, entry)?;
-                    entry
-                } else {
-                    lisp_name
-                };
-                dirlist = env.cons(entry, dirlist)?;
-            }
-            None => break,
+        env.message("changed again")?;
+        if nosort.is_some() {
+            Ok(dirlist)
+        } else {
+            Ok(env.nreverse(dirlist)?)
         }
-    }
-
-    env.message("changed again")?;
-    panic!("aaargh");
-    if nosort.is_some() {
-        Ok(dirlist)
-    } else {
-        env.nreverse(dirlist)
-    }
+    })
 }
 
 #[defun]
-fn delete_file(env: &Env, filename: Value, trash: Value) -> EmacsResult<()> {
-    let dissected = env.tramp_dissect_file_name(filename)?;
-    let session = get_connection(&dissected.user, &dissected.host, &env)?;
-    let sftp = session.sftp()?;
-    sftp.remove_file(&dissected.filename)?;
-    Ok(())
+fn delete_file<'a>(env: &'a Env, filename: Value<'a>, trash: Value<'a>) -> EmacsResult<Value<'a>> {
+    with_sftp(env, filename, |dissected, session, sftp| {
+        sftp.remove_file(&dissected.filename)?;
+        Ok(env.nil())
+    })
 }
 
 fn metadata_to_file_attributes<'a>(
@@ -830,42 +840,56 @@ fn file_attributes<'a>(
     filename: Value<'a>,
     id_format: Value<'a>,
 ) -> EmacsResult<Value<'a>> {
-    let dissected = env.tramp_dissect_file_name(filename)?;
-    let session = get_connection(&dissected.user, &dissected.host, &env)?;
-    let sftp = session.sftp()?;
-
-    let path = Path::new(&dissected.filename);
-    let dirname = path.parent().unwrap().to_str().unwrap().to_string();
-    let dir = sftp.open_dir(&dirname)?;
-    // For some reason you get more metadata from reading the directory than
-    // you do just getting file attributes directly
-    let metadata = {
-        loop {
-            match dir.read_dir().transpose()? {
-                Some(metadata) => match metadata.name() {
-                    Some(filename) => {
-                        if filename == path.file_name().unwrap() {
-                            break metadata;
+    with_sftp(env, filename, |dissected, session, sftp| {
+        let path = Path::new(&dissected.filename);
+        let dirname = path.parent().unwrap().to_str().unwrap().to_string();
+        let dir = sftp.open_dir(&dirname)?;
+        // For some reason you get more metadata from reading the directory than
+        // you do just getting file attributes directly
+        let metadata = {
+            loop {
+                match dir.read_dir().transpose()? {
+                    Some(metadata) => match metadata.name() {
+                        Some(filename) => {
+                            if filename == path.file_name().unwrap() {
+                                break metadata;
+                            }
                         }
-                    }
-                    _ => continue,
-                },
-                None => bail!("File {} not found", dissected.filename),
+                        _ => continue,
+                    },
+                    None => Err(io::Error::from(io::ErrorKind::NotFound))?,
+                }
             }
-        }
-    };
-    let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
+        };
+        let fs_metadata = sftp.vfs_metadata(&dissected.filename)?;
 
-    metadata_to_file_attributes(
-        env,
-        &sftp,
-        id_format,
-        &dirname,
-        &dissected,
-        &metadata,
-        &fs_metadata,
-    )
+        Ok(metadata_to_file_attributes(
+            env,
+            &sftp,
+            id_format,
+            &dirname,
+            &dissected,
+            &metadata,
+            &fs_metadata,
+        )?)
+    })
 }
+
+/*#[defun]
+fn make_process<'a>(
+    env: &'a Env,
+    name: &String,
+    buffer: &Option<String>,
+    command: Value<'a>,
+    coding: Value<'a>,
+    connection_type: Value<'a>,
+    query_flag: Value<'a>,
+    filter: Value<'a>,
+    sentinel: Value<'a>,
+    stderr: Value<'a>,
+) -> EmacsResult<Value<'a>> {
+
+}*/
 
 fn octal_permissions_to_string(permissions: u32) -> String {
     let mut permissions: u32 = permissions;
