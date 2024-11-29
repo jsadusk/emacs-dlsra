@@ -36,6 +36,11 @@
 ;; (let ((dissected (tramp-dissect-file-name "/ssh:joe@sadusk.com:/home/joe/hello.txt")))
 ;;   (message (prin1-to-string dissected))
 ;;   )
+(defun get-t (arg)
+  ;(message "hello")
+  t
+  )
+(message (concat "here i am again " (elt argv 0)))
 
 (add-to-list 'load-path "~/work/tramp-libssh")
 
@@ -44,36 +49,44 @@
 (setq testpath (concat "/ssh:" testhost ":" testdir))
 (setq testfilename "missing.yaml")
 (setq testfilepath (concat testpath testfilename))
-(setq module-path "/Users/jsadusk/work/tramp-libssh/target/debug/libtramp_libssh.dylib")
+(setq module-path "/Users/jsadusk/work/tramp-libssh/target/release/libtramp_libssh.dylib")
 (setq module-mtime -1)
 (message testfilepath)
-(require 'rs-module)
-
+;(require 'rs-module)
+(load module-path)
+(load "/Users/jsadusk/work/tramp-libssh/build/emacs-libssh.so")
 (defun load-if-changed()
   "load if the module has changed"
   ;(if (file-has-changed-p module-path)
-      (rs-module/load module-path)
-   ; (message "not changed")
-   ; )
+  ;(rs-module/load module-path)
+  ;(message "not changed")
+  ;)
   )
+(require 'benchmark)
 
 (defun test-libssh-insert-from-file ()
   (interactive)
   (load-if-changed)
   (message (prin1-to-string (tramp-dissect-file-name "/ssh:joe@sadusk.com:/home/joe/data.txt")))
-  (tramp-libssh-insert-file-contents1 "/ssh:joe@sadusk.com:/home/joe/data.txt" nil 4 15 nil)
+  (benchmark-run 1
+    (tramp-libssh-insert-file-contents "/ssh:joe@sadusk.com:/home/joe/data.txt" nil 4 15 nil)
+    )
   )
 (defun test-libssh-replace-from-file ()
   (interactive)
   (load-if-changed)
   (message (prin1-to-string (tramp-dissect-file-name "/ssh:joe@sadusk.com:/home/joe/data.txt")))
-  (tramp-libssh-insert-file-contents1 "/ssh:joe@sadusk.com:/home/joe/data.txt" nil 4 15 t)
+  (tramp-libssh-insert-file-contents "/ssh:joe@sadusk.com:/home/joe/data.txt" nil 4 15 t)
   )
 
 (defun test-libssh-write-buffer ()
   (interactive)
   (load-if-changed)
-  (tramp-libssh-write-region nil nil testfilepath nil nil nil nil)
+  (message (prin1-to-string
+  (benchmark-elapse
+    (tramp-libssh-write-region nil nil testfilepath nil nil nil nil)
+    )
+  ))
   )
 
 (defun test-libssh-write-buffer-append ()
@@ -85,9 +98,24 @@
 (defun test-libssh-file-exists ()
   (interactive)
   (load-if-changed)
-  (message (prin1-to-string (tramp-libssh-file-exists-p testfilepath)))
+  (message (prin1-to-string
+  (benchmark-elapse
+    (message (prin1-to-string (tramp-libssh-file-exists-p testfilepath)))
+    )))
+  (message (prin1-to-string
+  (benchmark-elapse
   (message (prin1-to-string (tramp-libssh-file-exists-p "/ssh:joe@sadusk.com:/home/joe/blarh.txt")))
+    )))
+  (message (prin1-to-string
+  (benchmark-elapse
+    (message (prin1-to-string (file-exists-p testfilepath)))
+    )))
+  (message (prin1-to-string
+  (benchmark-elapse
+  (message (prin1-to-string (file-exists-p "/ssh:joe@sadusk.com:/home/joe/blarh.txt")))
+    )))
   )
+
 
 (defun test-directory-files ()
   (interactive)
@@ -135,6 +163,58 @@
   (interactive)
   (load-if-changed)
   (message (prin1-to-string (tramp-libssh-file-attributes testfilepath 'string)))
+  )
+
+(defun test-call-process()
+  (interactive)
+  (load-if-changed)
+  (message testpath)
+  (let ((default-directory "/ssh:joe@sadusk.com:/home/joe"))
+    (message default-directory)
+    (message "libssh")
+    (message (prin1-to-string
+              (benchmark-elapse
+                (tramp-libssh-process-file "ls" nil "output" nil '("-l" "/usr"))
+                )))
+    (message (prin1-to-string
+              (benchmark-elapse
+                (tramp-libssh-process-file "ls" nil "output" nil '("-l" "/usr"))
+                )))
+    (message (prin1-to-string
+              (benchmark-elapse
+                (tramp-libssh-process-file "ls" nil "output" nil '("-l" "/usr"))
+                )))
+  (message "tramp")
+  (message default-directory)
+  (message (prin1-to-string
+  (benchmark-elapse
+    (process-file "ls" nil "output" nil "-l" "/usr")
+    )))
+  )
+  )
+
+(defun bare-lisp (arg)
+  (dotimes (i 10000)
+    (get-t arg)
+    )
+  )
+
+
+(defun test-bare ()
+  (interactive)
+  (load-if-changed)
+  (message "rust")
+  (message (prin1-to-string
+            (benchmark-elapse
+              (tramp-libssh-bare "hello"))))
+  (message "lisp")
+  (message (prin1-to-string
+            (benchmark-elapse
+              (bare-lisp "hello"))))
+  (message "C")
+  (message (prin1-to-string
+            (benchmark-elapse
+              (emacs-libssh-test-bare "hello"))))
   )
 
 ;(message (read-string "hello: " nil nil nil nil))\

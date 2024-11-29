@@ -15,6 +15,9 @@ libc = "0.2.153"
 libssh-rs = { git = "https://github.com/jsadusk/libssh-rs" }
 thread_local = "1.1.7"
 thiserror = "1.0"
+pipe = "0.4"
+crossbeam = "0.8"
+crossbeam-channel = "0.5.13"
 
 [dev-dependencies]
 emacs-rs-module = {version = "0.18.0"}

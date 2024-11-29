@@ -606,15 +606,31 @@ static emacs_value emacs_libssh_marker (emacs_env *env, ptrdiff_t nargs, emacs_v
     return 0;
 }
 
+static emacs_value test_bare (emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data) {
+    emacs_value get_t = env->intern(env, "get-t");
+    for (int i = 0; i < 10000; ++i) {
+        ptrdiff_t size;
+        env->copy_string_contents(env, args[0], NULL, &size);
+        char* message = calloc(sizeof(char), size);
+        env->copy_string_contents(env, args[0], message, &size);
+
+        emacs_value message_str = env->make_string (env, message, strlen(message));
+        env->funcall(env, get_t, 1, &message_str);
+        free(message);
+    }
+    return nilval(env);
+}
+
 int emacs_module_init(struct emacs_runtime *ert)
 {
 
   emacs_env *env = ert->get_environment(ert);
 
-  DEFUN("emacs-libssh-sftp-write-region", emacs_libssh_sftp_write_region, 6, 6, "Write a region from the current buffer into an sftp file", NULL);
+  /*DEFUN("emacs-libssh-sftp-write-region", emacs_libssh_sftp_write_region, 6, 6, "Write a region from the current buffer into an sftp file", NULL);
   DEFUN("emacs-libssh-get-ssh-session", emacs_libssh_get_ssh_session, 2, 2, "Get an ssh session", NULL);
   DEFUN("emacs-libssh-get-sftp-session", emacs_libssh_get_sftp_session, 1, 1, "Get an sftp session", NULL);
-  DEFUN("emacs-libssh-sftp-insert", emacs_libssh_sftp_insert, 5, 5, "Insert a file from sftp into the current buffer", NULL);
+  DEFUN("emacs-libssh-sftp-insert", emacs_libssh_sftp_insert, 5, 5, "Insert a file from sftp into the current buffer", NULL);*/
+  DEFUN("emacs-libssh-test-bare", test_bare, 1, 1, "Bare test", NULL);
   provide(env, "emacs-libssh");
   
   return 0;
